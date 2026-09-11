@@ -10,10 +10,14 @@
  * So this test raises a real modal dialog on purpose and checks that:
  *   1. /ping keeps answering (the process is alive and the bridge is reachable)
  *   2. /rpc reports EDITOR_BUSY rather than hanging forever
- *   3. the supervisor can name the blocking window
- *   4. the supervisor can answer it and the editor recovers
+ *   3. the supervisor can name the blocking window, and tells a dialog apart from a floating editor panel
+ *   4. the allowlist covers the prompt Unity really raises, and does not cover an unrecognised one
+ *   5. the supervisor can answer it and the editor recovers
  *
- * The dialog is titled to match the allowlist so the recovery path itself is exercised.
+ * The synthetic dialog is deliberately titled so that it does *not* match the auto-dismiss allowlist. A
+ * supervisor watching this project with --auto-dismiss-dialogs — which is how the README says to run it —
+ * would otherwise answer it within a poll interval, and this suite would be racing the defence it exists to
+ * observe. The allowlist is checked as data instead, against the title Unity actually uses.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -54,8 +58,8 @@ const pid = bridgePid();
 const blocked = rpc(
   "unity.eval_csharp",
   {
-    code: `EditorUtility.DisplayDialog("Detected external changes",
-  "Synthetic dialog raised by tests/dialog-recovery.mjs to verify the supervisor can answer it.", "Reload", "Ignore");
+    code: `EditorUtility.DisplayDialog("Agentic synthetic probe",
+  "Synthetic dialog raised by tests/dialog-recovery.mjs to verify the supervisor can see and answer it.", "OK", "Cancel");
 return "dialog answered";`,
   },
   { timeoutMs: 20_000, reconnectWindowMs: 20_000 }
@@ -83,14 +87,22 @@ try {
 
 // 3. The supervisor must be able to say what is in the way.
 const dialogs = findDialogs(pid);
-const target = dialogs.find((d) => /Detected external changes/i.test(d.title));
+const target = dialogs.find((d) => /Agentic synthetic probe/i.test(d.title));
 report("supervisor names the blocking dialog", Boolean(target),
   dialogs.length ? dialogs.map((d) => `"${d.title}" (${d.className})`).join(", ") : "no dialogs found");
 
 // 4. The allowlist must cover it, and dismissing must unblock the editor.
 if (target) {
-  const allow = matchAllowlist(target.title);
-  report("dialog is on the auto-dismiss allowlist", allow.allowed === true, allow.note ?? "not allowlisted");
+  // Checked as data rather than by raising an allowlisted dialog: a supervisor watching this project with
+  // --auto-dismiss-dialogs would answer that one within a poll interval, and the test would then be racing
+  // the defence it is trying to observe. The string is the one Unity actually raises.
+  const real = matchAllowlist("The open scene(s) have been modified externally");
+  report("the real external-modification prompt is on the auto-dismiss allowlist", real.allowed === true,
+    real.note ?? "not allowlisted");
+
+  const synthetic = matchAllowlist(target.title);
+  report("an unrecognised dialog is not auto-dismissed", synthetic.allowed === false,
+    `"${target.title}" -> ${synthetic.allowed ? "allowed, which it should not be" : "reported, not answered"}`);
 
   const outcome = dismissDialog(target);
   report("dismiss was attempted", outcome.attempted === true, JSON.stringify(outcome));

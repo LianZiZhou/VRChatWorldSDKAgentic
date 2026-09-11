@@ -24,7 +24,7 @@ import {
   readProjectVersion,
   verifyEditorForProject,
 } from "./unity.js";
-import { dismissDialog, findDialogs, matchAllowlist, type WindowInfo } from "./dialogs.js";
+import { dismissDialog, findDialogs, findOwnedWindows, matchAllowlist, type WindowInfo } from "./dialogs.js";
 
 interface Config {
   unityExe: string;
@@ -202,8 +202,11 @@ async function status(cfg: Config): Promise<Record<string, unknown>> {
   // Enumerating windows costs a PowerShell launch, so only do it when something is actually wrong —
   // which is also the only time the answer matters.
   let dialogs: WindowInfo[] = [];
+  let otherWindows: WindowInfo[] = [];
   if (processAlive && (verdict === "stalled" || verdict === "unreachable")) {
-    dialogs = findDialogs(info.pid);
+    const owned = findOwnedWindows(info.pid);
+    dialogs = owned.filter((w) => w.modal);
+    otherWindows = owned.filter((w) => !w.modal);
   }
 
   return {
@@ -219,6 +222,9 @@ async function status(cfg: Config): Promise<Record<string, unknown>> {
     pumpTicks: ping?.pumpTicks ?? null,
     verdict,
     dialogs: dialogs.map((d) => ({ ...d, dismissAllowed: matchAllowlist(d.title).allowed })),
+    // Floating editor panels, reported but never treated as blocking: the VRChat SDK control panel is
+    // one of these and has to stay open for builds to work.
+    otherWindows: otherWindows.map((w) => ({ handle: w.handle, title: w.title, className: w.className })),
     blockedByDialog: dialogs.length > 0,
   };
 }
@@ -421,8 +427,15 @@ async function main(): Promise<void> {
         process.stdout.write(JSON.stringify({ error: "editor is not running" }, null, 2) + "\n");
         return;
       }
-      const found = findDialogs(info.pid).map((d) => ({ ...d, ...matchAllowlist(d.title) }));
-      process.stdout.write(JSON.stringify({ pid: info.pid, dialogCount: found.length, dialogs: found }, null, 2) + "\n");
+      const owned = findOwnedWindows(info.pid);
+      const found = owned.filter((w) => w.modal).map((d) => ({ ...d, ...matchAllowlist(d.title) }));
+      const report = {
+        pid: info.pid,
+        dialogCount: found.length,
+        dialogs: found,
+        otherWindows: owned.filter((w) => !w.modal).map((w) => ({ title: w.title, className: w.className })),
+      };
+      process.stdout.write(JSON.stringify(report, null, 2) + "\n");
       return;
     }
     case "dismiss": {

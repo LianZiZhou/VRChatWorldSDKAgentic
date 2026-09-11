@@ -12,10 +12,26 @@
  * to be safe to answer.
  */
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-const scriptsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
+/**
+ * Where the PowerShell helpers live.
+ *
+ * Checked rather than computed, because this module runs from two layouts: packages/supervisor/dist during
+ * development, and a single bundled file under bundled/ in a released checkout. Counting "../" works in one
+ * and silently points at nothing in the other.
+ */
+const scriptsDir = (() => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "..", "scripts"),                                  // dist/ layout
+    join(here, "..", "packages", "supervisor", "scripts"),         // bundled/ layout
+    join(process.cwd(), "packages", "supervisor", "scripts"),      // run from the repo root
+  ];
+  return candidates.find((dir) => existsSync(join(dir, "list-windows.ps1"))) ?? candidates[0];
+})();
 
 export interface WindowInfo {
   handle: number;
@@ -24,7 +40,21 @@ export interface WindowInfo {
   visible: boolean;
   enabled: boolean;
   hasOwner: boolean;
+  /** True for a real Win32 dialog box, which is the only kind of window that can block the editor loop. */
+  modal: boolean;
 }
+
+/**
+ * Win32 class of a dialog box. Everything Unity raises through EditorUtility.DisplayDialog, and every
+ * progress bar that blocks the editor, is registered under this class.
+ *
+ * The distinction matters more than it looks. Unity's own floating EditorWindows — the VRChat SDK control
+ * panel among them — are owned top-level windows too, under UnityContainerWndClass. Counting those as
+ * dialogs made the supervisor declare the editor "blocked by dialog" permanently, because the SDK panel is
+ * required to be open for builds to work at all; that suppressed wedge restarts exactly when one was
+ * needed, and a genuinely unreachable editor sat there for a quarter of an hour.
+ */
+const DIALOG_CLASS = "#32770";
 
 /**
  * Dialog titles this tool will answer on its own.
@@ -68,6 +98,7 @@ export function listWindows(pid: number): WindowInfo[] {
       visible: Boolean(w.Visible),
       enabled: Boolean(w.Enabled),
       hasOwner: Boolean(w.HasOwner),
+      modal: String(w.ClassName ?? "") === DIALOG_CLASS,
     }));
   } catch {
     return [];
@@ -75,12 +106,22 @@ export function listWindows(pid: number): WindowInfo[] {
 }
 
 /**
- * Windows that look like a dialog rather than the editor itself.
+ * Windows that can actually block the editor: titled, owned, and of the Win32 dialog class.
  *
  * Unity's main window carries the project/scene name and owns nothing; its dialogs are owned top-level
- * windows. Untitled windows are tooltips and popups, not things a human would click.
+ * windows. Untitled windows are tooltips and popups, not things a human would click. Owned windows that
+ * are not dialog-class are the editor's own floating panels — see DIALOG_CLASS for why counting those
+ * was actively harmful.
  */
 export function findDialogs(pid: number, mainWindowTitle?: string): WindowInfo[] {
+  return findOwnedWindows(pid, mainWindowTitle).filter((w) => w.modal);
+}
+
+/**
+ * Every owned, titled window — dialogs and floating editor panels alike. Reported so a stalled run can be
+ * described accurately ("the SDK panel is open, and nothing is blocking") rather than only when blocked.
+ */
+export function findOwnedWindows(pid: number, mainWindowTitle?: string): WindowInfo[] {
   return listWindows(pid).filter((w) => {
     if (!w.title.trim()) return false;
     if (mainWindowTitle && w.title === mainWindowTitle) return false;
