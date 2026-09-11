@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vrcw": {
+      "command": "node",
+      "args": ["D:/Projects/VRChatWorldSDKAgentic/packages/vrcw-mcp/dist/index.js"]
+    }
+  }
+}

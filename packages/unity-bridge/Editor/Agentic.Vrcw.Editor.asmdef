@@ -1,0 +1,27 @@
+{
+    "name": "Agentic.Vrcw.Editor",
+    "rootNamespace": "Agentic.Vrcw",
+    "references": [
+        "VRC.SDK3.Editor",
+        "VRC.SDKBase.Editor",
+        "VRC.SDK3",
+        "VRC.SDKBase",
+        "VRC.Udon",
+        "VRC.Udon.Editor",
+        "UdonSharp.Runtime",
+        "UdonSharp.Editor",
+        "VRC.ClientSim",
+        "UniTask"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

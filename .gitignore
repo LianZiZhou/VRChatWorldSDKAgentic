@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+obj/
+bin/
+.agentic/
+*.log
+
+# Unity writes .meta files into the bridge package when it is linked into a project.
+# Our asmdef is referenced by name, not GUID, so these carry no information we need to track.
+*.meta

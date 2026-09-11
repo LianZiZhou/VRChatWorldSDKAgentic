@@ -1,0 +1,8 @@
+{
+  "name": "com.agentic.vrcw",
+  "displayName": "Agentic VRCW Bridge",
+  "version": "0.1.0",
+  "unity": "2022.3",
+  "description": "Always-on editor bridge that lets an external agent drive VRChat world development.",
+  "author": { "name": "VRChatWorldSDKAgentic" }
+}
