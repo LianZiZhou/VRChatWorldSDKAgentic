@@ -116,3 +116,16 @@ project_rollback --target <sha> --confirm true
 Rollback commits the current state first and anchors it under `refs/agentic/safety/...`, so it is reversible
 and cannot be garbage-collected. Afterwards the editor still holds the old scene in memory — reopen it or call
 `unity_refresh_assets` before trusting what the editor shows.
+
+## The other half of the tools
+
+Two MCP servers attach to the same editor. The `vrcw_*`, `world_*`, `udon_*`, `scene_*`, `verify_*`,
+`budget_*` and `assets_*` tools are the VRChat-specific half. Generic Unity work — baking GI and lightmaps,
+NavMesh, prefab operations, the Test Runner, profiling, animation — belongs to the bundled generic server
+(`manage_scene`, `manage_gameobject`, `manage_asset`, `manage_editor`, `read_console`, and around forty
+others). Prefer the VRChat-specific tool when both could do the job: `scene_apply_spec` is idempotent and
+costs one call where per-object editing costs dozens, and `udon_set_fields` writes UdonSharp fields through
+the proxy so the values survive a build, which generic component editing does not.
+
+If the generic tools are missing or report no editor, call `companion_status` — it names the cause, which is
+always one of two things, and `companion_setup` fixes both.

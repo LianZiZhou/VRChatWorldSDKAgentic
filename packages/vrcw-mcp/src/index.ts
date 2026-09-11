@@ -2,10 +2,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { analyzerExe, analyzerRoot } from "./paths.js";
 import { listInstances } from "./registry.js";
 import { ping, rpc, BridgeError } from "./bridge.js";
 import * as projectGit from "./project.js";
@@ -122,6 +123,32 @@ tool(
       { apply: a.apply ?? true, disableDomainReloadOnPlay: a.disableDomainReloadOnPlay ?? false },
       { project: a.project }
     )
+);
+
+tool(
+  "companion_status",
+  "Whether the bundled generic Unity MCP package (CoplayDev, MIT) is installed, compiled and serving.\n" +
+    "That package covers the generic editor surface this bridge deliberately does not reimplement: GI and " +
+    "lightmap baking, NavMesh, prefab operations, the Test Runner, profiling, animation. If its tools are " +
+    "missing or its server cannot find this editor, call this first — it names the reason rather than " +
+    "leaving you to guess, and nextSteps says what to do about it.",
+  { ...projectArg },
+  async (a) => rpc("companion.status", {}, { project: a.project })
+);
+
+tool(
+  "companion_setup",
+  "Make the bundled generic Unity MCP package usable, and report what changed. Idempotent.\n" +
+    "Two things stop that package working on its own, and this does both: Unity only rescans Packages/ at " +
+    "startup, so a package added to a running editor needs PackageManager.Client.Resolve() before its " +
+    "assemblies compile; and its bridge is gated behind an EditorPref that defaults to false, so it ships " +
+    "installed but mute. It also switches the package's telemetry off, which is opt-out upstream. A Resolve " +
+    "reloads the script domain, so poll companion_status until ready is true.",
+  {
+    ...projectArg,
+    apply: z.boolean().optional().describe("False reports what would change without changing it. Default true."),
+  },
+  async (a) => rpc("companion.setup", { apply: a.apply ?? true }, { project: a.project, timeoutMs: 300_000 })
 );
 
 tool(
@@ -977,6 +1004,43 @@ tool(
 
 // ---------------------------------------------------------------- udon lint (no Unity involved)
 
+let analyzerBuild: { ok: boolean; detail: string } | null = null;
+
+/**
+ * Returns the analyzer binary, building it once if this checkout has not built it yet.
+ *
+ * Lazily, rather than only as an install step, because a linter that answers "I am not built, go run
+ * dotnet" is a linter an unattended agent cannot use: it has no way to know that a two-second build
+ * stands between it and the answer. The build is attempted at most once per server process, and a
+ * failure reports dotnet's own output rather than a bare exit code.
+ */
+function ensureAnalyzer(): string {
+  const exe = analyzerExe();
+  if (existsSync(exe)) return exe;
+
+  if (analyzerBuild && !analyzerBuild.ok) {
+    throw new Error(`The Udon analyzer is not built, and building it failed earlier:\n${analyzerBuild.detail}`);
+  }
+
+  const project = join(analyzerRoot(), "UdonAnalyzer.csproj");
+  const built = spawnSync("dotnet", ["build", "-c", "Release", project], { encoding: "utf8", timeout: 300_000 });
+
+  if (built.error || built.status !== 0 || !existsSync(exe)) {
+    const detail = [built.error?.message, built.stdout?.trim(), built.stderr?.trim()]
+      .filter(Boolean)
+      .join("\n")
+      .slice(-2000);
+    analyzerBuild = { ok: false, detail: detail || `dotnet exited ${built.status}` };
+    throw new Error(
+      `The Udon analyzer is not built and could not be built automatically.\n` +
+        `Tried: dotnet build -c Release "${project}"\n${analyzerBuild.detail}`
+    );
+  }
+
+  analyzerBuild = { ok: true, detail: "built on demand" };
+  return exe;
+}
+
 /**
  * Runs the standalone Roslyn linter.
  *
@@ -985,18 +1049,7 @@ tool(
  * the syntax tree, so this turns that loop from tens of seconds into milliseconds.
  */
 function runAnalyzer(paths: string[]): Promise<unknown> {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const root = join(here, "..", "..", "udon-analyzer");
-  const exe = join(root, "bin", "Release", "net8.0", process.platform === "win32" ? "udon-analyzer.exe" : "udon-analyzer");
-
-  if (!existsSync(exe)) {
-    return Promise.reject(
-      new Error(
-        `The Udon analyzer is not built. Run:\n  dotnet build -c Release "${join(root, "UdonAnalyzer.csproj")}"\n` +
-          `Expected the binary at ${exe}`
-      )
-    );
-  }
+  const exe = ensureAnalyzer();
 
   return new Promise((resolve, reject) => {
     const child = spawn(exe, ["--json", ...paths], { stdio: ["ignore", "pipe", "pipe"] });

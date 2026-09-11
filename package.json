@@ -1,0 +1,18 @@
+{
+  "name": "vrchat-world-sdk-agentic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Autonomous VRChat world development for Unity 2022.3 + Worlds SDK 3.x: an in-editor bridge, an MCP server, a process supervisor, and a Roslyn linter.",
+  "scripts": {
+    "install:project": "node scripts/install.mjs",
+    "build": "npm --prefix packages/vrcw-mcp run build && npm --prefix packages/supervisor run build",
+    "bundle": "node scripts/bundle.mjs",
+    "vpm:listing": "node scripts/make-vpm-listing.mjs",
+    "publish:dry": "node scripts/publish.mjs --dry-run",
+    "test": "node tests/run-all.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

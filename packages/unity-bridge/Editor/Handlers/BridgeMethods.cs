@@ -34,6 +34,7 @@ namespace Agentic.Vrcw.Bridge
             AssetOps.Register();
             GeoGenerate.Register();
             UdonWhitelist.Register();
+            CompanionSetup.Register();
         }
 
         // ---------- introspection ----------

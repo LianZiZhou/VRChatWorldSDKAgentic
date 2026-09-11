@@ -3,13 +3,48 @@
 Why this toolchain is shaped the way it is. Every constraint below was verified against
 Unity 2022.3.22f1 + VRChat Worlds SDK 3.10.5, not inferred.
 
-## 1. Unity's own MCP is not an option here
+## 1. Unity's own MCP is not an option here, so the generic layer is vendored
 
 Unity's first-party MCP ships in `com.unity.ai.assistant` and **requires Unity 6 (6000.0) or later**.
 VRChat pins the Worlds SDK to Unity 2022.3 (`com.vrchat.worlds/package.json: "unity": "2022.3"`), so the
-official server cannot be used at all. The generic Unity layer has to come from a community server
-(AnkleBreaker `unity-mcp-server` and CoplayDev `unity-mcp` both support 2021.3+ including 2022.3), and
-everything VRChat-specific is ours to build.
+official server cannot be used at all. That splits the work in two: everything VRChat-specific is ours to
+build, and the generic Unity surface has to come from a community server.
+
+The generic half is **CoplayDev's MCP for Unity, vendored** into `third_party/unity-mcp` at a pinned tag
+(MIT; see `third_party/unity-mcp/VENDORED.md`). Vendoring rather than depending on it is the point: the
+deliverable is a checkout that works after one command, and "first install this other project" is precisely
+the kind of step an unattended agent cannot take. It also pins what we tested against — an upstream release
+can rename tools, and `tests/companion-mcp.mjs` fails loudly when the ones we rely on move.
+
+What it covers, and what we therefore do not reimplement: GI and lightmap baking, NavMesh, prefab
+operations, the Test Runner, profiling, animation, VFX. What it does not cover is everything in sections 8
+to 16 below — Udon, the SDK build pipeline, ClientSim verification, world budgets, spatial auditing.
+
+Two details make the difference between "installed" and "working", and both cost a diagnosis to find:
+
+- Unity only rescans `Packages/` at **startup**. A package dropped into a running editor stays invisible
+  until `UnityEditor.PackageManager.Client.Resolve()` is called; `AssetDatabase.Refresh()` does nothing for
+  it. The symptom is an installed package whose assemblies never compile.
+- Its bridge only auto-starts when the EditorPref `MCPForUnity.AutoStartOnLoad` is true, and it defaults to
+  **false**. The symptom is its server reporting "No Unity Editor instances found" against a perfectly
+  healthy editor.
+
+`CompanionSetup` does both, and `CompanionAutoEnable` does them once per project from
+`EditorApplication.update` — not from the static constructor, because the companion's own
+`[InitializeOnLoad]` must have run first, and not from `delayCall`, which has been observed not to fire at
+all after a domain reload.
+
+### Telemetry is switched off in two places, because there are two servers
+
+Upstream telemetry is opt-out. The editor-side reporter honours an EditorPref or an environment variable;
+the Python server honours **environment variables only** — it has no persisted setting. That matters because
+there are two server processes in play: the one an MCP client launches (covered by the `env` block the
+installer writes into `.mcp.json`), and the one the Unity package launches itself on load, which inherits
+the *editor's* environment instead. So the bridge sets `DISABLE_TELEMETRY=1` inside the editor process on
+every load, and the EditorPref once. Both are asserted by `tests/companion-mcp.mjs`.
+
+This is a changed default rather than a judgement about the upstream project: a toolchain that runs
+unattended should not begin reporting to a third party because nobody thought to look.
 
 ## 2. The build API cannot run in batch mode
 
@@ -32,16 +67,20 @@ line (`EnvConfig.cs:471`) — the SDK has no CI awareness whatsoever.
 ## 3. Layers
 
 ```
-MCP client (Claude Code / Codex)
-   │  stdio
-   ▼
-packages/vrcw-mcp          Node/TS MCP server; discovers editors, retries through domain reloads
-   │  HTTP 127.0.0.1 + token
-   ▼
-Packages/com.agentic.vrcw  Editor-side bridge: HttpListener + main-thread pump + jobs
-   │
-   ▼
-Unity Editor (GUI)  ←owned by→  packages/supervisor
+            MCP client (Claude Code / Codex)
+             │  stdio                    │  stdio
+             ▼                           ▼
+packages/vrcw-mcp                third_party/unity-mcp/Server
+  VRChat-specific; discovers        generic Unity; vendored, MIT
+  editors, retries reloads          (CoplayDev MCP for Unity)
+             │  HTTP 127.0.0.1 + token   │  TCP 127.0.0.1:6400
+             ▼                           ▼
+Packages/com.agentic.vrcw        Packages/com.coplaydev.unity-mcp
+  HttpListener + main-thread         its own editor-side bridge
+  pump + jobs
+             └───────────┬───────────────┘
+                         ▼
+            Unity Editor (GUI)  ←owned by→  packages/supervisor
 ```
 
 ### Transport: HTTP, not a persistent socket
@@ -299,3 +338,45 @@ Download and import are separate steps. `open_assets_fetch` puts a file in a sta
 `assets_import_file` brings it into the project and *requires* `source` and `licence`. Nothing reaches a project
 without provenance, because an agent that skips this produces a world nobody can later clear for distribution —
 and that cannot be reconstructed after the fact. `ATTRIBUTION.md` is generated from the ledger, never hand-written.
+
+## 17. Distribution: two paths, for two different users
+
+`bundled/` holds committed single-file builds of the MCP server and the supervisor, dependencies inlined by
+esbuild. A fresh clone therefore runs without `npm install` — which matters because the first thing the
+toolchain has to do is work on a machine nobody has prepared, possibly offline or behind a registry mirror.
+`packages/*/dist` remains the development output; `bundled/` is what ships, and `scripts/bundle.mjs`
+regenerates it.
+
+| Path | For | Notes |
+|---|---|---|
+| `scripts/install.mjs` | the autonomous setup | links both Unity packages into the project, so editing the bridge here changes what the editor loads |
+| `scripts/make-vpm-listing.mjs` | people who live in the Creator Companion | produces a listing plus a zip; a VCC install **copies** the package, so the bridge stops being editable in place |
+| `scripts/publish.mjs` | `npx` use without a checkout | dry run by default; refuses to publish a package still marked private, and refuses a dirty tree |
+
+The installer is idempotent and reports per step, because it is also the diagnostic: re-running it on a
+working setup should say "already linked", "committed bundles", "companion ready" and change nothing.
+
+## 18. Two bugs that only an unattended run finds
+
+Both were found by this toolchain's own instruments, and both had the same shape: the editor was perfectly
+alive while looking dead from outside.
+
+**The bridge could not rebind its port after a domain reload.** Unity's Mono implements `HttpListener` over a
+managed socket, so a port already in use surfaces as a bare `SocketException`, not the
+`HttpListenerException` the bind loop caught. It escaped the per-attempt catch, aborted `Start()` before the
+fallback to a different port, and — because the retry watchdog kept preferring the port remembered in
+`SessionState` — left the editor permanently unreachable with nothing but a repeating log line. The fix is
+three lines wide and the diagnosis was most of the work: catch both exception types, and stop preferring the
+remembered port once it has failed. Clients read the port from the registry file, so moving is transparent.
+
+**Responses leaked sockets.** Closing only the response's output stream leaves Mono's keep-alive bookkeeping
+in place; a long-lived poller left one socket per request in `CLOSE_WAIT`, dozens within an hour. Responses
+now set `KeepAlive = false` and close the response itself. Connection reuse buys a localhost control channel
+nothing.
+
+A third, in the supervisor: it treated **any** owned top-level window as a blocking dialog, and Unity's
+floating `EditorWindow`s are owned top-level windows too. The VRChat SDK control panel is one of them, and it
+has to stay open for builds to work at all — so the supervisor declared the editor "blocked by dialog"
+permanently and suppressed the wedge restart exactly when one was needed. Only the Win32 dialog class
+(`#32770`) can block the editor loop; everything else is now reported as a window, not a blocker.
+

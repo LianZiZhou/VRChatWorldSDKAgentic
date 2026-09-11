@@ -2,7 +2,24 @@
   "mcpServers": {
     "vrcw": {
       "command": "node",
-      "args": ["D:/Projects/VRChatWorldSDKAgentic/packages/vrcw-mcp/dist/index.js"]
+      "args": [
+        "D:/Projects/VRChatWorldSDKAgentic/bundled/vrcw-mcp.mjs"
+      ]
+    },
+    "unity-generic": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "D:/Projects/VRChatWorldSDKAgentic/third_party/unity-mcp/Server",
+        "--frozen",
+        "mcp-for-unity"
+      ],
+      "env": {
+        "DISABLE_TELEMETRY": "1",
+        "UNITY_MCP_DISABLE_TELEMETRY": "1",
+        "MCP_DISABLE_TELEMETRY": "1"
+      }
     }
   }
 }

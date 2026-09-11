@@ -81,7 +81,7 @@ try {
     "unity_job_submit", "unity_job_wait",
     "udon_status", "udon_create_script", "udon_compile", "udon_attach", "udon_set_fields",
     "udon_read_vars", "udon_list_behaviours",
-    "unity_harden_editor",
+    "unity_harden_editor", "companion_status", "companion_setup",
     "world_project_status", "world_fix_project", "world_scaffold", "world_describe_scene", "world_validate",
     "scene_apply_spec", "scene_describe", "scene_component_whitelist", "scene_spatial_audit", "scene_survey_shots",
     "verify_scenario_schema", "verify_clientsim", "verify_build_local", "verify_multiclient_preflight",

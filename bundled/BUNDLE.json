@@ -1,0 +1,8 @@
+{
+  "generatedUtc": "2026-09-11T15:52:00.901Z",
+  "node": "v24.13.0",
+  "versions": {
+    "vrcw-mcp": "0.1.0",
+    "vrcw-supervisor": "0.1.0"
+  }
+}
