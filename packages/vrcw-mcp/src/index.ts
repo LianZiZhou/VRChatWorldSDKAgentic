@@ -92,6 +92,33 @@ tool(
 // ---------------------------------------------------------------- observation
 
 tool(
+  "unity_harden_editor",
+  "Turn off the editor's interactive prompts. Call this once after the editor starts, before writing any " +
+    "assets.\n" +
+    "A modal dialog is the worst failure mode here: it halts Unity's update loop, so the bridge's pump " +
+    "stops and every call returns EDITOR_BUSY with nobody to click the button. Unity's \"detected external " +
+    "changes, reload?\" prompt only exists when Asset Pipeline Auto Refresh is off, so this makes sure it " +
+    "is on, along with the other prefs that can raise a dialog during asset work.",
+  {
+    ...projectArg,
+    apply: z.boolean().optional().describe("False reports what would change without changing it. Default true."),
+    disableDomainReloadOnPlay: z
+      .boolean()
+      .optional()
+      .describe(
+        "Also disable domain reload on entering play mode. Required by ClientSim's test guidance and much " +
+          "faster, but it changes play-mode semantics (statics are not reset), so it is opt-in."
+      ),
+  },
+  async (a) =>
+    rpc(
+      "bridge.harden_editor",
+      { apply: a.apply ?? true, disableDomainReloadOnPlay: a.disableDomainReloadOnPlay ?? false },
+      { project: a.project }
+    )
+);
+
+tool(
   "unity_editor_state",
   "Open scenes, active build target, selection, and the two VRChat preconditions for autonomous work: " +
     "whether the SDK control panel window is open and whether the account is logged in. Both are " +
@@ -431,6 +458,176 @@ tool(
   "Every UdonSharpBehaviour in the loaded scenes, with GameObject path and whether its program asset is linked.",
   { ...projectArg },
   async (a) => rpc("udon.list_behaviours", {}, { project: a.project })
+);
+
+// ---------------------------------------------------------------- world & scene
+
+tool(
+  "world_project_status",
+  "Whether VRChat layers, the collision matrix and player settings are configured.",
+  { ...projectArg },
+  async (a) => rpc("world.project_status", {}, { project: a.project })
+);
+
+tool(
+  "world_fix_project",
+  "Apply VRChat's layer and collision-matrix setup. Idempotent.\n" +
+    "Do this before any build: the SDK refuses outright with \"You must address Layers and Collision " +
+    "Matrix issues before you can build\". The SDK's own buttons for this sit behind confirmation dialogs, " +
+    "which would freeze an unattended editor, so this calls the underlying operations directly.",
+  {
+    ...projectArg,
+    layers: z.boolean().optional(),
+    collisionMatrix: z.boolean().optional(),
+    playerSettings: z.boolean().optional(),
+  },
+  async (a) =>
+    rpc(
+      "world.fix_project",
+      { layers: a.layers ?? true, collisionMatrix: a.collisionMatrix ?? true, playerSettings: a.playerSettings ?? true },
+      { project: a.project, timeoutMs: 120_000 }
+    )
+);
+
+tool(
+  "world_scaffold",
+  "Create a minimal valid VRChat world scene: one VRCSceneDescriptor with a PipelineManager on the same " +
+    "GameObject, at least one spawn point, a reference camera and a floor.\n" +
+    "Refuses to discard unsaved scenes unless discardUnsaved is set, and refuses to replace an existing " +
+    "scene unless overwrite is set.",
+  {
+    ...projectArg,
+    path: z.string().optional().describe("Scene path under Assets/. Default Assets/Scenes/World.unity."),
+    addFloor: z.boolean().optional(),
+    overwrite: z.boolean().optional(),
+    discardUnsaved: z.boolean().optional().describe("Permit losing unsaved changes in the open scenes."),
+  },
+  async (a) =>
+    rpc(
+      "world.scaffold",
+      { path: a.path, addFloor: a.addFloor ?? true, overwrite: a.overwrite ?? false, discardUnsaved: a.discardUnsaved ?? false },
+      { project: a.project, timeoutMs: 180_000 }
+    )
+);
+
+tool(
+  "world_describe_scene",
+  "The scene descriptor's configuration plus a `problems` list naming anything that would block a build " +
+    "(no descriptor, more than one, no valid spawn, missing PipelineManager).",
+  { ...projectArg },
+  async (a) => rpc("world.describe_scene", {}, { project: a.project })
+);
+
+tool(
+  "world_validate",
+  "Run the SDK's own pre-build validations and get errors, warnings and performance stats back as data.\n" +
+    "There is no API for this — the validations exist only to paint the SDK panel's GUI — so this opens " +
+    "the control panel, runs the checks into a throwaway element and reads the results out, including the " +
+    "warnings and stats that have no public getter.",
+  { ...projectArg, openPanel: z.boolean().optional().describe("Open the SDK panel if closed. Default true.") },
+  async (a) => rpc("world.validate", { openPanel: a.openPanel ?? true }, { project: a.project, timeoutMs: 180_000 })
+);
+
+tool(
+  "scene_apply_spec",
+  "Create or update GameObjects and components from a declarative spec, in one call. Idempotent — objects " +
+    "are keyed by hierarchy path, so re-applying converges instead of duplicating.\n" +
+    "Prefer this over one-object-at-a-time editing: a world of any size otherwise costs hundreds of round " +
+    "trips. Each object takes path, position/rotation/scale (rotation as 3 numbers is Euler), active, " +
+    "layer, tag, primitive or prefab (honoured only at creation), and components[{type, fields}].\n" +
+    "Warns when a component is not on VRChat's whitelist, because those are silently stripped at build. " +
+    "Refuses UdonSharpBehaviours — use udon_attach, which also wires the backing UdonBehaviour.",
+  {
+    ...projectArg,
+    objects: z.array(z.record(z.any())).optional(),
+    delete: z.array(z.string()).optional().describe("Hierarchy paths to destroy."),
+    dryRun: z.boolean().optional().describe("Report what would change without changing it."),
+    saveScene: z.boolean().optional().describe("Default true."),
+  },
+  async (a) =>
+    rpc(
+      "scene.apply_spec",
+      { objects: a.objects ?? [], delete: a.delete ?? [], dryRun: a.dryRun ?? false, saveScene: a.saveScene ?? true },
+      { project: a.project, timeoutMs: 180_000 }
+    )
+);
+
+tool(
+  "scene_describe",
+  "Hierarchy of the loaded scenes with each object's components, transform and layer.",
+  {
+    ...projectArg,
+    root: z.string().optional().describe("Limit to this hierarchy path."),
+    maxDepth: z.number().int().min(0).max(12).optional(),
+    includeInactive: z.boolean().optional(),
+  },
+  async (a) =>
+    rpc(
+      "scene.describe",
+      { root: a.root, maxDepth: a.maxDepth ?? 4, includeInactive: a.includeInactive ?? true },
+      { project: a.project }
+    )
+);
+
+tool(
+  "scene_component_whitelist",
+  "VRChat's allowed component types. Anything absent is stripped from the built world, so a scene can " +
+    "look correct in the editor and lose behaviour once uploaded.",
+  { ...projectArg, filter: z.string().optional() },
+  async (a) => rpc("scene.component_whitelist", { filter: a.filter }, { project: a.project })
+);
+
+tool(
+  "scene_spatial_audit",
+  "Physics-based geometry checks: are spawns standing on something, how much of the scene has ground " +
+    "beneath it, which objects float, interpenetrate, lack colliders, sit absurdly far from the origin or " +
+    "have degenerate scale.\n" +
+    "Findings are prompts to look, not verdicts — a deliberately floating lamp is not a bug. Pair with " +
+    "scene_survey_shots, which covers composition rather than geometry.",
+  {
+    ...projectArg,
+    gridStep: z.number().min(0.25).max(20).optional().describe("Floor-probe grid spacing in metres. Default 2."),
+    maxObjects: z.number().int().min(1).max(50_000).optional(),
+    floatThreshold: z.number().min(0).max(50).optional().describe("Metres of clearance that counts as floating. Default 0.35."),
+  },
+  async (a) =>
+    rpc(
+      "scene.spatial_audit",
+      { gridStep: a.gridStep ?? 2, maxObjects: a.maxObjects ?? 4000, floatThreshold: a.floatThreshold ?? 0.35 },
+      { project: a.project, timeoutMs: 180_000 }
+    )
+);
+
+tool(
+  "scene_survey_shots",
+  "Render the scene to PNG files from the spawn points at player eye height, an orbit, and top-down, and " +
+    "return their absolute paths for you to read back as images.\n" +
+    "This is the only way to judge composition, facing and lighting — no amount of hierarchy inspection " +
+    "will tell you a room reads as a room or that the lighting came out black.",
+  {
+    ...projectArg,
+    mode: z.enum(["spawns", "orbit", "top", "all"]).optional(),
+    width: z.number().int().min(128).max(3840).optional(),
+    height: z.number().int().min(128).max(2160).optional(),
+    yawSteps: z.number().int().min(1).max(12).optional().describe("Directions photographed per spawn. Default 4."),
+    orbitCount: z.number().int().min(1).max(16).optional(),
+    fieldOfView: z.number().min(20).max(140).optional(),
+    label: z.string().optional().describe("Included in the filenames."),
+  },
+  async (a) =>
+    rpc(
+      "scene.survey_shots",
+      {
+        mode: a.mode ?? "all",
+        width: a.width ?? 960,
+        height: a.height ?? 540,
+        yawSteps: a.yawSteps ?? 4,
+        orbitCount: a.orbitCount ?? 4,
+        fieldOfView: a.fieldOfView ?? 70,
+        label: a.label ?? "survey",
+      },
+      { project: a.project, timeoutMs: 180_000 }
+    )
 );
 
 // ---------------------------------------------------------------- boot

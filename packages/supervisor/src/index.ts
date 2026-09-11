@@ -24,6 +24,7 @@ import {
   readProjectVersion,
   verifyEditorForProject,
 } from "./unity.js";
+import { dismissDialog, findDialogs, matchAllowlist, type WindowInfo } from "./dialogs.js";
 
 interface Config {
   unityExe: string;
@@ -38,6 +39,10 @@ interface Config {
   allowVersionMismatch: boolean;
   /** Grace period after a launch during which a not-yet-registered editor counts as starting. */
   startupGraceSeconds: number;
+  /** Answer allowlisted modal dialogs automatically when they block the editor. */
+  autoDismissDialogs: boolean;
+  /** Dismiss even non-allowlisted dialogs. Only for a human who has looked at the dialog. */
+  force: boolean;
   pollSeconds: number;
 }
 
@@ -56,6 +61,7 @@ const DEFAULTS = {
   allowWedgeRestart: false,
   pollSeconds: 10,
   startupGraceSeconds: 300,
+  autoDismissDialogs: false,
 };
 
 // ------------------------------------------------------------------ helpers
@@ -193,6 +199,13 @@ async function status(cfg: Config): Promise<Record<string, unknown>> {
     else verdict = "healthy";
   }
 
+  // Enumerating windows costs a PowerShell launch, so only do it when something is actually wrong —
+  // which is also the only time the answer matters.
+  let dialogs: WindowInfo[] = [];
+  if (processAlive && (verdict === "stalled" || verdict === "unreachable")) {
+    dialogs = findDialogs(info.pid);
+  }
+
   return {
     bridgeRegistered: true,
     projectName: info.projectName,
@@ -205,6 +218,8 @@ async function status(cfg: Config): Promise<Record<string, unknown>> {
     queueDepth: ping?.queueDepth ?? null,
     pumpTicks: ping?.pumpTicks ?? null,
     verdict,
+    dialogs: dialogs.map((d) => ({ ...d, dismissAllowed: matchAllowlist(d.title).allowed })),
+    blockedByDialog: dialogs.length > 0,
   };
 }
 
@@ -259,8 +274,31 @@ async function watch(cfg: Config): Promise<void> {
         return; // a misconfigured install will not fix itself by retrying
       }
       await sleep(15_000); // let it get going before the next probe
-    } else if (verdict === "stalled") {
+    } else if (verdict === "stalled" || verdict === "unreachable") {
       const stalledFor = Number(snapshot.secondsSincePump ?? 0);
+      const dialogs = (snapshot.dialogs as Array<WindowInfo & { dismissAllowed: boolean }>) ?? [];
+
+      if (dialogs.length > 0) {
+        // Name the dialog. Without this the symptom is just "everything times out", which tells an agent
+        // nothing about the cause and nothing about the fix.
+        for (const dialog of dialogs) {
+          log(`BLOCKED by dialog "${dialog.title}" (class=${dialog.className}, dismissAllowed=${dialog.dismissAllowed})`);
+        }
+
+        if (cfg.autoDismissDialogs) {
+          for (const dialog of dialogs) {
+            if (!dialog.dismissAllowed) {
+              log(`not dismissing "${dialog.title}": not on the allowlist. Answer it yourself, or extend the allowlist.`);
+              continue;
+            }
+            const outcome = dismissDialog(dialog);
+            log(`dismissed "${dialog.title}": ${JSON.stringify(outcome)}`);
+          }
+        } else {
+          log("pass --auto-dismiss-dialogs true to let the supervisor answer allowlisted dialogs automatically.");
+        }
+      }
+
       if (cfg.allowWedgeRestart && stalledFor > cfg.stallRestartSeconds) {
         log(`main thread stalled ${Math.round(stalledFor)}s; killing pid=${snapshot.pid} and relaunching`);
         kill(Number(snapshot.pid));
@@ -309,6 +347,8 @@ function parseArgs(argv: string[]): { command: string; cfg: Config } {
       allowWedgeRestart: (flags.get("allow-wedge-restart") ?? "") === "true",
       allowVersionMismatch: (flags.get("allow-version-mismatch") ?? "") === "true",
       startupGraceSeconds: Number(flags.get("startup-grace") ?? DEFAULTS.startupGraceSeconds),
+      autoDismissDialogs: (flags.get("auto-dismiss-dialogs") ?? "") === "true",
+      force: (flags.get("force") ?? "") === "true",
       pollSeconds: Number(flags.get("poll") ?? DEFAULTS.pollSeconds),
     },
   };
@@ -322,6 +362,8 @@ Commands
   watch     Stay resident: relaunch on death, report stalls.
   stop      Kill the editor for this project.
   editors   List every Unity install and whether it may open this project.
+  dialogs   List modal dialogs currently blocking the editor.
+  dismiss   Answer blocking dialogs (allowlisted only unless --force).
 
 Options
   --project PATH               Unity project root (or env VRCW_PROJECT)
@@ -334,6 +376,9 @@ Options
   --stall-restart N            Seconds before a stalled editor may be killed (default ${DEFAULTS.stallRestartSeconds})
   --allow-wedge-restart true   Permit killing a stalled editor. Off by default: long bakes and imports
                                stall the pump legitimately, and a kill would discard real work.
+  --auto-dismiss-dialogs true    Answer allowlisted blocking dialogs (external-change reload, verify
+                               saving assets) by pressing their default button. Off by default: pressing
+                               the default button of an unrecognised dialog agrees to something nobody asked.
   --allow-version-mismatch true
                                Open the project with a non-matching editor. Do not use on VRChat
                                projects: a Unity China ("...f1c1") editor is unsupported by VRChat and
@@ -368,6 +413,38 @@ async function main(): Promise<void> {
     }
     case "editors": {
       process.stdout.write(JSON.stringify(editors(cfg), null, 2) + "\n");
+      return;
+    }
+    case "dialogs": {
+      const info = findBridgeInfo(cfg.projectPath);
+      if (!info) {
+        process.stdout.write(JSON.stringify({ error: "editor is not running" }, null, 2) + "\n");
+        return;
+      }
+      const found = findDialogs(info.pid).map((d) => ({ ...d, ...matchAllowlist(d.title) }));
+      process.stdout.write(JSON.stringify({ pid: info.pid, dialogCount: found.length, dialogs: found }, null, 2) + "\n");
+      return;
+    }
+    case "dismiss": {
+      const info = findBridgeInfo(cfg.projectPath);
+      if (!info) {
+        process.stdout.write(JSON.stringify({ error: "editor is not running" }, null, 2) + "\n");
+        return;
+      }
+      const outcomes = [];
+      for (const dialog of findDialogs(info.pid)) {
+        const allow = matchAllowlist(dialog.title);
+        if (!allow.allowed && !cfg.force) {
+          outcomes.push({
+            title: dialog.title,
+            attempted: false,
+            reason: "not on the allowlist; inspect it, then re-run with --force if its default button is safe",
+          });
+          continue;
+        }
+        outcomes.push({ ...dismissDialog(dialog), allowlisted: allow.allowed, note: allow.note });
+      }
+      process.stdout.write(JSON.stringify({ pid: info.pid, outcomes }, null, 2) + "\n");
       return;
     }
     case "stop": {

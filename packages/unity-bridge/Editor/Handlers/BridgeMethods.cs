@@ -19,7 +19,12 @@ namespace Agentic.Vrcw.Bridge
             RegisterIntrospection();
             RegisterExecution();
             RegisterJobs();
+            EditorHardening.Register();
             UdonOps.Register();
+            WorldOps.Register();
+            SceneSpec.Register();
+            SpatialAudit.Register();
+            SurveyShots.Register();
         }
 
         // ---------- introspection ----------

@@ -100,6 +100,16 @@ public class ${CLASS} : UdonSharpBehaviour
 }
 `;
 
+// Remove the editor's interactive prompts before touching assets. A modal dialog halts Unity's update
+// loop and therefore the bridge's pump, which would stall the whole suite with nobody to click the button.
+await check("editor prompts are disabled", async () => {
+  const h = await rpc("bridge.harden_editor", { apply: true }, { timeoutMs: 60_000 });
+  const bad = (h.settings ?? []).filter((s) => !s.compliant).map((s) => s.key);
+  assert(bad.length === 0, `still interactive: ${bad.join(", ")}`);
+  return `changed=${JSON.stringify(h.changed)}`;
+});
+
+
 // ---------------------------------------------------------------- setup
 
 await check("editor is idle and the Udon surface is registered", async () => {

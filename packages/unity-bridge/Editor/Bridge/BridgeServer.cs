@@ -27,12 +27,14 @@ namespace Agentic.Vrcw.Bridge
         private const int PortAttempts = 12;
         private const string SessionPortKey = "Agentic.Vrcw.BridgePort";
         private const string SessionTokenKey = "Agentic.Vrcw.BridgeToken";
+        private const int MaxConcurrentRequests = 64;
 
         private static HttpListener _listener;
         private static Thread _acceptThread;
         private static int _port;
         private static string _token;
         private static volatile bool _running;
+        private static int _inFlight;
         private static readonly DateTime StartedUtc = DateTime.UtcNow;
 
         static BridgeServer()
@@ -182,14 +184,32 @@ namespace Agentic.Vrcw.Bridge
                 try { ctx = _listener.GetContext(); }
                 catch (Exception) { return; } // listener closed (reload/quit)
 
-                // Handled inline rather than on the thread pool: requests marshal onto the main
-                // thread anyway, so concurrency here buys nothing and would reorder calls.
-                try { Handle(ctx); }
-                catch (Exception ex)
+                // Each request is handled on the thread pool, never inline on the accept thread.
+                //
+                // Handling inline looks harmless because main-thread methods marshal onto the pump
+                // anyway, but it breaks the one guarantee that matters most: a single /rpc waiting on a
+                // blocked main thread would occupy the accept thread for its whole timeout, so /ping
+                // could not be accepted either. That was observed with a real modal dialog - the editor
+                // looked *dead* rather than *blocked*, which is the opposite of what /ping exists for.
+                if (Interlocked.Increment(ref _inFlight) > MaxConcurrentRequests)
                 {
-                    try { Respond(ctx, 500, BridgeRouter.Error("TRANSPORT_ERROR", ex.Message)); }
+                    Interlocked.Decrement(ref _inFlight);
+                    try { Respond(ctx, 503, BridgeRouter.Error("TOO_MANY_REQUESTS", "Bridge has " + MaxConcurrentRequests + " requests in flight.")); }
                     catch (Exception) { }
+                    continue;
                 }
+
+                var captured = ctx;
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    try { Handle(captured); }
+                    catch (Exception ex)
+                    {
+                        try { Respond(captured, 500, BridgeRouter.Error("TRANSPORT_ERROR", ex.Message)); }
+                        catch (Exception) { }
+                    }
+                    finally { Interlocked.Decrement(ref _inFlight); }
+                });
             }
         }
 
