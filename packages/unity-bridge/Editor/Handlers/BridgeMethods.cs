@@ -25,6 +25,10 @@ namespace Agentic.Vrcw.Bridge
             SceneSpec.Register();
             SpatialAudit.Register();
             SurveyShots.Register();
+            ClientSimHarness.Register();
+            BuildOps.Register();
+            VrcLogReader.Register();
+            MultiClient.Register();
         }
 
         // ---------- introspection ----------

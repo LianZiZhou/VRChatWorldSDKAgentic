@@ -630,6 +630,164 @@ tool(
     )
 );
 
+// ---------------------------------------------------------------- verification
+
+/**
+ * Submits a job and polls until it finishes.
+ *
+ * Polling has to tolerate the editor going unresponsive: a build or a play-mode session occupies the main
+ * thread for long stretches, so EDITOR_BUSY during the wait is expected rather than a failure.
+ */
+async function runJobAndWait(
+  kind: string,
+  params: Record<string, unknown>,
+  options: { project?: string; waitMs?: number; pollMs?: number } = {}
+): Promise<any> {
+  const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
+  const job: any = await rpc("job.submit", { kind, params }, { project: options.project });
+  const deadline = Date.now() + (options.waitMs ?? 900_000);
+  let last: any = job;
+
+  while (Date.now() < deadline) {
+    try {
+      last = await rpc("job.status", { id: job.id }, { project: options.project, timeoutMs: 20_000 });
+      if (terminal.has(String(last.state))) return last;
+    } catch (err) {
+      if (err instanceof BridgeError && err.code !== "EDITOR_BUSY") throw err;
+    }
+    await new Promise((r) => setTimeout(r, options.pollMs ?? 1500));
+  }
+  return { ...last, timedOut: true, hint: "The job is still running; poll unity_job_status with its id." };
+}
+
+tool(
+  "verify_scenario_schema",
+  "The step types a ClientSim verification scenario accepts, with what each one does and does not prove.",
+  { ...projectArg },
+  async (a) => rpc("verify.scenario_schema", {}, { project: a.project })
+);
+
+tool(
+  "verify_clientsim",
+  "Run a behavioural scenario against the world in a real ClientSim play-mode session, and return a " +
+    "per-step pass/fail report.\n" +
+    "PROVES Udon program logic: interact entry points, event chains, variable state, objects ending up " +
+    "active or not.\n" +
+    "DOES NOT prove reachability — `interact` invokes the behaviour's entry point directly rather than " +
+    "aiming a player at a collider, so it cannot catch a button behind a wall; use scene_spatial_audit for " +
+    "geometry. DOES NOT prove networking — ClientSim is single-player, so ownership, late joiners and sync " +
+    "need verify_multiclient.\n" +
+    "Call verify_scenario_schema for the step list. The session disables domain reload on Play, which is " +
+    "required and also makes the SDK emit known harmless errors; assert_no_errors reports those separately " +
+    "under `ignored` instead of failing.",
+  {
+    ...projectArg,
+    steps: z.array(z.record(z.any())).describe("Scenario steps, in order."),
+    name: z.string().optional(),
+    settings: z.record(z.any()).optional().describe("ClientSimSettings overrides for this run."),
+    stopOnFailure: z.boolean().optional().describe("Default true."),
+    waitMs: z.number().int().min(10_000).max(3_600_000).optional(),
+  },
+  async (a) =>
+    runJobAndWait(
+      "verify.clientsim",
+      { steps: a.steps, name: a.name ?? "scenario", settings: a.settings ?? {}, stopOnFailure: a.stopOnFailure ?? true },
+      { project: a.project, waitMs: a.waitMs ?? 900_000 }
+    )
+);
+
+tool(
+  "verify_build_local",
+  "Build the open scene into a local .vrcw world bundle and report its path and size. This is the SDK's " +
+    "real build pipeline, so it catches everything validation does not.\n" +
+    "Upload is intentionally not available: the autonomy boundary for this toolchain is local Build & Test.",
+  {
+    ...projectArg,
+    dryRun: z.boolean().optional().describe("Use the SDK's dry-run flag to smoke-test the pipeline without building."),
+    waitMs: z.number().int().min(10_000).max(3_600_000).optional(),
+  },
+  async (a) => runJobAndWait("verify.build_local", { dryRun: a.dryRun ?? false }, { project: a.project, waitMs: a.waitMs ?? 1_800_000 })
+);
+
+tool(
+  "world_build_status",
+  "Active build target, which platform modules this editor has, the SDK dry-run flag, and the Build & Test client count.",
+  { ...projectArg },
+  async (a) => rpc("world.build_status", {}, { project: a.project })
+);
+
+tool(
+  "world_set_dry_run",
+  "Toggle the SDK's dry-run flag, which makes build and upload report success without doing the work.",
+  { ...projectArg, enabled: z.boolean() },
+  async (a) => rpc("world.set_dry_run", { enabled: a.enabled }, { project: a.project })
+);
+
+tool(
+  "world_switch_platform",
+  "Switch the active build target, for producing both a PC and a Quest/Android build of the same world. " +
+    "This reloads the script domain, so any job in flight is interrupted and must be resubmitted.",
+  { ...projectArg, platform: z.enum(["Windows", "Android", "iOS"]) },
+  async (a) => rpc("world.switch_platform", { platform: a.platform }, { project: a.project, timeoutMs: 300_000 })
+);
+
+tool(
+  "verify_multiclient_preflight",
+  "What must be true before Build & Test can launch real VRChat clients, and which parts currently are. " +
+    "Needs a VRChat client installed, a signed-in account, a world builder and a PC build target.",
+  { ...projectArg },
+  async (a) => rpc("verify.multiclient_preflight", {}, { project: a.project, timeoutMs: 120_000 })
+);
+
+tool(
+  "verify_multiclient",
+  "Build & Test with several real VRChat clients in one instance, then read their logs. This is the only " +
+    "way to verify networking: ClientSim simulates none, so ownership, late-joiner state and sync " +
+    "convergence are invisible to verify_clientsim.\n" +
+    "Udon cannot send data out (VRCUrl is not constructible at runtime), so assert on telemetry the world " +
+    "itself logs: Debug.Log lines of the form [AGENTTEL]{\"key\":\"value\"}, which this parses back out.",
+  {
+    ...projectArg,
+    clients: z.number().int().min(1).max(8).optional().describe("Clients to launch. Default 2."),
+    observeSeconds: z.number().int().min(5).max(1800).optional().describe("How long to let them run before reading logs. Default 60."),
+    forceNoVR: z.boolean().optional().describe("Launch in desktop mode. Default true."),
+    waitMs: z.number().int().min(10_000).max(3_600_000).optional(),
+  },
+  async (a) =>
+    runJobAndWait(
+      "verify.multiclient",
+      { clients: a.clients ?? 2, observeSeconds: a.observeSeconds ?? 60, forceNoVR: a.forceNoVR ?? true },
+      { project: a.project, waitMs: a.waitMs ?? 1_800_000 }
+    )
+);
+
+tool(
+  "verify_vrc_logs",
+  "Parse the real VRChat client's logs for Udon exceptions, Debug.Log output and [AGENTTEL] telemetry. " +
+    "The client must have been launched with --enable-udon-debug-logging or Udon lines are absent.",
+  {
+    ...projectArg,
+    maxFiles: z.number().int().min(1).max(12).optional(),
+    maxLines: z.number().int().min(100).max(50_000).optional(),
+    sinceUtc: z.string().optional().describe("Ignore log files older than this ISO timestamp."),
+    grep: z.string().optional(),
+  },
+  async (a) =>
+    rpc(
+      "verify.read_vrc_logs",
+      { maxFiles: a.maxFiles ?? 2, maxLines: a.maxLines ?? 4000, sinceUtc: a.sinceUtc, grep: a.grep },
+      { project: a.project, timeoutMs: 120_000 }
+    )
+);
+
+tool(
+  "verify_udon_exceptions",
+  "Udon runtime exceptions from both sides: the Unity console (where UdonSharp's watcher maps a fault back " +
+    "to the C# file and line) and the VRChat client logs.",
+  { ...projectArg, sinceSeq: z.number().int().min(0).optional() },
+  async (a) => rpc("verify.udon_exceptions", { sinceSeq: a.sinceSeq ?? 0 }, { project: a.project })
+);
+
 // ---------------------------------------------------------------- boot
 
 async function main(): Promise<void> {
