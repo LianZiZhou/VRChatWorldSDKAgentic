@@ -16,6 +16,7 @@ import { build } from "esbuild";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hashSources } from "./source-hash.mjs";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(repo, "bundled");
@@ -55,9 +56,17 @@ for (const pkg of ["vrcw-mcp", "supervisor"]) {
   const manifest = JSON.parse(readFileSync(join(repo, "packages", pkg, "package.json"), "utf8"));
   versions[manifest.name] = manifest.version;
 }
+
+// A content hash of the sources, not a timestamp.
+//
+// Staleness has to be answerable after a fresh clone, where every file carries the same checkout mtime, and
+// the stamp should not change when nothing did — a timestamp makes this file churn on every rebuild and
+// still cannot tell a clone whether the bundle matches its sources. scripts/install.mjs recomputes this and
+// warns on a mismatch, which is the one failure this layout introduces: .mcp.json points at bundled/, so an
+// unbundled edit means the running server is not the code being read.
 writeFileSync(
   join(out, "BUNDLE.json"),
-  JSON.stringify({ generatedUtc: new Date().toISOString(), node: process.version, versions }, null, 2) + "\n",
+  JSON.stringify({ node: process.version, versions, sourcesSha256: hashSources(repo) }, null, 2) + "\n",
   "utf8"
 );
 console.log("manifest       -> bundled/BUNDLE.json");

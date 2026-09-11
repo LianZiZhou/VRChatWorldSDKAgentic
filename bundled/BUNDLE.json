@@ -1,8 +1,8 @@
 {
-  "generatedUtc": "2026-09-11T15:52:00.901Z",
   "node": "v24.13.0",
   "versions": {
     "vrcw-mcp": "0.1.0",
     "vrcw-supervisor": "0.1.0"
-  }
+  },
+  "sourcesSha256": "64824b379ffe2092a9e9751f089e15398e4f77c26c76a7f673b31a5b2d9222e0"
 }

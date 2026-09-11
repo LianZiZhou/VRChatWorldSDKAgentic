@@ -37,6 +37,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hashSources } from "./source-hash.mjs";
 
 const repo = resolve(join(dirname(fileURLToPath(import.meta.url)), ".."));
 
@@ -290,29 +291,23 @@ installPackage(
 // ---------------------------------------------------------------- 5. the Node programs
 
 /**
- * Source files modified after the committed bundles were generated.
+ * True when the committed bundles were built from different sources than the ones in this checkout.
  *
- * A stale bundle is the one failure mode this layout introduces: `.mcp.json` points at `bundled/`, so an
- * edit to src that nobody bundled means the running server silently is not the code being read. Cheap to
- * check, and confusing to debug otherwise.
+ * A stale bundle is the one failure this layout introduces: .mcp.json points at bundled/, so an edit nobody
+ * bundled means the running server silently is not the code being read. Compared by content hash rather than
+ * by timestamps, which say nothing useful in a fresh clone where every file shares one checkout mtime.
  */
-function staleBundleSources() {
+function bundlesAreStale() {
   const stamp = join(repo, "bundled", "BUNDLE.json");
-  if (!existsSync(stamp)) return [];
-  const generated = statSync(stamp).mtimeMs;
-
-  const newer = [];
-  const walk = (dir) => {
-    if (!existsSync(dir)) return;
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (/\.(ts|mjs|js)$/.test(entry.name) && statSync(full).mtimeMs > generated) newer.push(full);
-    }
-  };
-  walk(join(repo, "packages", "vrcw-mcp", "src"));
-  walk(join(repo, "packages", "supervisor", "src"));
-  return newer;
+  if (!existsSync(stamp)) return false;
+  try {
+    const recorded = JSON.parse(readFileSync(stamp, "utf8")).sourcesSha256;
+    if (!recorded) return false;
+    return hashSources(repo) !== recorded;
+  } catch {
+    // An older stamp, or an unreadable source tree: not a reason to hold up an install.
+    return false;
+  }
 }
 
 const bundledServer = join(repo, "bundled", "vrcw-mcp.mjs");
@@ -325,9 +320,9 @@ let supervisorEntry = existsSync(bundledSupervisor) ? bundledSupervisor : exists
 
 if (serverEntry && supervisorEntry) {
   const which = serverEntry === bundledServer ? "committed bundles, no npm install needed" : "built from packages/";
-  const stale = serverEntry === bundledServer ? staleBundleSources() : [];
-  if (stale.length) {
-    step("node programs", "warn", `${which}: ${serverEntry}, but ${stale.length} source file(s) are newer`,
+  const stale = serverEntry === bundledServer ? bundlesAreStale() : false;
+  if (stale) {
+    step("node programs", "warn", `${which}: ${serverEntry}, but it was built from different sources`,
       "run: npm run build && npm run bundle — otherwise the server you start is not the source you are reading");
   } else {
     step("node programs", "ok", `${which}: ${serverEntry}`);
