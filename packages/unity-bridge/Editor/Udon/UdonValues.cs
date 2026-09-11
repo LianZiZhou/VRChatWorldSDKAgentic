@@ -15,6 +15,8 @@ namespace Agentic.Vrcw.Bridge
     ///   { "$component": { "path": "VRCWorld/Door", "type": "Animator" } }
     ///   { "$asset": "Assets/Materials/Glass.mat" }              -> any asset by project path
     ///   { "$null": true }                                        -> explicit null
+    /// A string targeting a type that has a single-string constructor builds one, which is how a VRCUrl
+    /// field gets a URL: Udon cannot construct a VRCUrl at runtime, so the editor has to do it.
     /// Vectors and colours accept either an object ({x,y,z}) or an array ([x,y,z]).
     /// </summary>
     public static class UdonValues
@@ -78,6 +80,19 @@ namespace Agentic.Vrcw.Bridge
                 return s.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
                     ? ResolveAsset(s, target)
                     : (target == typeof(GameObject) ? ResolveGameObject(s, target) : ResolveComponentByPath(s, target));
+            }
+
+            // A plain type that wraps a single string: construct it from one.
+            //
+            // VRCUrl is why this exists. Udon cannot construct a VRCUrl at runtime — that restriction is the
+            // whole reason video worlds carry their URLs as inspector fields — so setting one from the editor
+            // is the only way an agent can put a URL into a world at all. The rule is written structurally
+            // rather than against the type name so it does not need a reference to the SDK, and so anything
+            // else shaped this way works too.
+            if (json is string && !target.IsValueType)
+            {
+                var stringCtor = target.GetConstructor(new[] { typeof(string) });
+                if (stringCtor != null) return stringCtor.Invoke(new object[] { (string)json });
             }
 
             throw new ArgumentException("no conversion defined for this JSON shape");

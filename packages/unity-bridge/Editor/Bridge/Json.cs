@@ -123,6 +123,25 @@ namespace Agentic.Vrcw.Bridge
 
             sb.Append('{');
             sb.Append("\"__type\":"); WriteString(sb, t.FullName);
+
+            // A type that keeps its content private, but says what it is when asked.
+            //
+            // VRCUrl is the case that matters: it has no public members at all, so reflection alone emits
+            // {"__type":"VRC.SDKBase.VRCUrl"} and an agent reading back a video URL it just set learns
+            // nothing. An overridden ToString is the type's own answer to "what are you", so it is reported
+            // as "toString" — a type that has not overridden it is left alone, since Type.FullName twice is
+            // noise.
+            if (HasCustomToString(t))
+            {
+                string described = null;
+                try { described = v.ToString(); } catch (Exception) { }
+                if (!string.IsNullOrEmpty(described))
+                {
+                    sb.Append(",\"toString\":");
+                    WriteString(sb, described);
+                }
+            }
+
             var fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
             for (int i = 0; i < fields.Length; i++)
             {
@@ -144,6 +163,18 @@ namespace Agentic.Vrcw.Bridge
             }
             sb.Append('}');
             if (!t.IsValueType) seen.Remove(v);
+        }
+
+
+        /// <summary>Whether this type overrides ToString(), rather than inheriting object's type-name one.</summary>
+        private static bool HasCustomToString(Type t)
+        {
+            try
+            {
+                var method = t.GetMethod("ToString", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+                return method != null && method.DeclaringType != typeof(object) && method.DeclaringType != typeof(ValueType);
+            }
+            catch (Exception) { return false; }
         }
 
         private static bool WriteUnityValueType(StringBuilder sb, object v, int depth, HashSet<object> seen)

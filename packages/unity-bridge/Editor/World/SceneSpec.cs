@@ -281,7 +281,22 @@ namespace Agentic.Vrcw.Bridge
                     continue;
                 }
 
-                warnings.Add("\"" + pair.Key + "\" is not a writable member of " + type.Name + "; skipped.");
+                // Private fields are writable only when Unity itself serialises them.
+                //
+                // Several SDK components keep their wiring in private [SerializeField] fields — VRCUnityVideoPlayer
+                // holds its UnityEngine.Video.VideoPlayer and its target audio sources that way — so refusing to
+                // touch them means a video screen cannot be assembled from a spec at all. The [SerializeField]
+                // requirement is the line: it is state the component intends to be set in the inspector, which is
+                // exactly what this method is standing in for. Anything else private stays off limits.
+                var serialized = type.GetField(pair.Key, BindingFlags.NonPublic | BindingFlags.Instance);
+                if (serialized != null && Attribute.IsDefined(serialized, typeof(SerializeField)))
+                {
+                    serialized.SetValue(component, UdonValues.Convert(pair.Value, serialized.FieldType, pair.Key));
+                    continue;
+                }
+
+                warnings.Add("\"" + pair.Key + "\" is not a writable member of " + type.Name +
+                             (serialized != null ? " (it is private and not [SerializeField])" : "") + "; skipped.");
             }
         }
 
