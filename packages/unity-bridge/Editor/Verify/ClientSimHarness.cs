@@ -68,6 +68,21 @@ namespace Agentic.Vrcw.Bridge
                              "Compare a GameObject's activeInHierarchy."),
                         Step("assert_position", "{ \"assert_position\": { \"gameObject\": \"P/Box\", \"near\": [0,1,0], \"tolerance\": 0.1 } }",
                              "Compare a transform's world position."),
+                        Step("grab", "{ \"grab\": { \"gameObject\": \"P/Prop\", \"hand\": \"right\" } }",
+                             "Have the local player pick the object up, through ClientSim's own hand, so VRCPickup state " +
+                             "updates and OnPickup fires. hand is \"left\", \"right\" (default) or \"either\". Does not " +
+                             "check reachability: the hand takes the object wherever it is."),
+                        Step("drop", "{ \"drop\": { \"gameObject\": \"P/Prop\" } }",
+                             "Drop a held pickup, firing OnDrop."),
+                        Step("assert_held", "{ \"assert_held\": { \"gameObject\": \"P/Prop\", \"equals\": true } }",
+                             "Compare whether a pickup is currently held, as ClientSim reports it."),
+                        Step("sit", "{ \"sit\": { \"gameObject\": \"P/Chair\" } }",
+                             "Put the local player into a VRCStation, firing OnStationEntered. Goes through " +
+                             "ClientSimStationHelper.UseStation, the same path VRCStation.UseStation takes."),
+                        Step("stand", "{ \"stand\": { \"gameObject\": \"P/Chair\" } }",
+                             "Take the local player out of a station, firing OnStationExited."),
+                        Step("assert_in_station", "{ \"assert_in_station\": { \"gameObject\": \"P/Chair\", \"equals\": true } }",
+                             "Compare whether a station is occupied."),
                         Step("teleport", "{ \"teleport\": { \"position\": [0,0,5] } }",
                              "Move the local player via VRCPlayerApi.TeleportTo."),
                         Step("respawn", "{ \"respawn\": true }", "Respawn the local player."),
@@ -403,6 +418,102 @@ namespace Agentic.Vrcw.Bridge
                 outcome["ok"] = distance <= tolerance;
                 if (distance > tolerance)
                     outcome["error"] = go.name + " is " + distance.ToString("0.000") + "m from the expected position (tolerance " + tolerance + ")";
+                yield break;
+            }
+
+            if (step.TryGetValue("grab", out value))
+            {
+                var spec = Json.AsObject(value);
+                var go = UdonReflection.FindGameObject(Json.GetString(spec, "gameObject"));
+                outcome["step"] = "grab";
+                outcome["target"] = UdonOps.HierarchyPath(go.transform);
+                var result = ClientSimPlayerActions.Grab(go, Json.GetString(spec, "hand", "right"));
+                foreach (var pair in result) outcome[pair.Key] = pair.Value;
+                bool held = result.ContainsKey("held") && (bool)result["held"];
+                outcome["ok"] = held;
+                if (!held) outcome["error"] = "the hand did not end up holding it";
+                outcome["detail"] = Convert.ToString(result["hand"], CultureInfo.InvariantCulture) + " hand";
+                // A frame so the hand's own Update and the Udon OnPickup event both run before the next step.
+                yield return null;
+                yield break;
+            }
+
+            if (step.TryGetValue("drop", out value))
+            {
+                var spec = Json.AsObject(value);
+                var go = UdonReflection.FindGameObject(Json.GetString(spec, "gameObject"));
+                outcome["step"] = "drop";
+                outcome["target"] = UdonOps.HierarchyPath(go.transform);
+                var result = ClientSimPlayerActions.Drop(go);
+                foreach (var pair in result) outcome[pair.Key] = pair.Value;
+                bool stillHeld = result.ContainsKey("held") && (bool)result["held"];
+                outcome["ok"] = !stillHeld;
+                if (stillHeld) outcome["error"] = "it is still held after the drop";
+                yield return null;
+                yield break;
+            }
+
+            if (step.TryGetValue("assert_held", out value))
+            {
+                var spec = Json.AsObject(value);
+                var go = UdonReflection.FindGameObject(Json.GetString(spec, "gameObject"));
+                outcome["step"] = "assert_held";
+                outcome["target"] = UdonOps.HierarchyPath(go.transform);
+                object holder = ClientSimPlayerActions.HeldBy(go);
+                bool actual = holder != null;
+                bool expected = Json.GetBool(spec, "equals", true);
+                outcome["actual"] = actual;
+                outcome["expected"] = expected;
+                outcome["ok"] = actual == expected;
+                if (actual != expected)
+                    outcome["error"] = "held is " + actual + ", expected " + expected;
+                yield break;
+            }
+
+            if (step.TryGetValue("sit", out value))
+            {
+                var spec = Json.AsObject(value);
+                var go = UdonReflection.FindGameObject(Json.GetString(spec, "gameObject"));
+                outcome["step"] = "sit";
+                outcome["target"] = UdonOps.HierarchyPath(go.transform);
+                var result = ClientSimPlayerActions.Sit(go);
+                foreach (var pair in result) outcome[pair.Key] = pair.Value;
+                bool seated = result.ContainsKey("seated") && (bool)result["seated"];
+                outcome["ok"] = seated;
+                if (!seated) outcome["error"] = "the player did not end up in the station";
+                yield return null;
+                yield break;
+            }
+
+            if (step.TryGetValue("stand", out value))
+            {
+                var spec = Json.AsObject(value);
+                var go = UdonReflection.FindGameObject(Json.GetString(spec, "gameObject"));
+                outcome["step"] = "stand";
+                outcome["target"] = UdonOps.HierarchyPath(go.transform);
+                var result = ClientSimPlayerActions.Stand(go);
+                foreach (var pair in result) outcome[pair.Key] = pair.Value;
+                bool seated = result.ContainsKey("seated") && (bool)result["seated"];
+                outcome["ok"] = !seated;
+                if (seated) outcome["error"] = "the player is still in the station";
+                yield return null;
+                yield break;
+            }
+
+            if (step.TryGetValue("assert_in_station", out value))
+            {
+                var spec = Json.AsObject(value);
+                var go = UdonReflection.FindGameObject(Json.GetString(spec, "gameObject"));
+                outcome["step"] = "assert_in_station";
+                outcome["target"] = UdonOps.HierarchyPath(go.transform);
+                object occupant = ClientSimPlayerActions.StationOccupant(go);
+                bool actual = occupant != null;
+                bool expected = Json.GetBool(spec, "equals", true);
+                outcome["actual"] = actual;
+                outcome["expected"] = expected;
+                outcome["ok"] = actual == expected;
+                if (actual != expected)
+                    outcome["error"] = "occupied is " + actual + ", expected " + expected;
                 yield break;
             }
 
