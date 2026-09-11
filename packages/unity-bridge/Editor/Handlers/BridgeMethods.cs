@@ -19,6 +19,7 @@ namespace Agentic.Vrcw.Bridge
             RegisterIntrospection();
             RegisterExecution();
             RegisterJobs();
+            UdonOps.Register();
         }
 
         // ---------- introspection ----------

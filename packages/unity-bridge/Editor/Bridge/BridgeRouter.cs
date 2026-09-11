@@ -75,38 +75,56 @@ namespace Agentic.Vrcw.Bridge
         public static int Count { get { return Methods.Count; } }
 
         /// <summary>
-        /// Executes a method, marshalling onto the main thread when the method needs it.
-        /// Error shaping happens here so every transport gets identical error codes.
+        /// Executes a method and returns the complete JSON response.
+        ///
+        /// Serialisation deliberately happens *inside* the main-thread work item for main-thread methods.
+        /// Results routinely contain live UnityEngine.Objects, and reading even their name off the main
+        /// thread throws "GetName can only be called from the main thread" — which would turn a perfectly
+        /// good result into a transport error after the handler had already succeeded.
         /// </summary>
-        public static Dictionary<string, object> Invoke(string name, Dictionary<string, object> args, int timeoutMsOverride)
+        public static string InvokeToJson(string name, Dictionary<string, object> args, int timeoutMsOverride, object id, bool hasId)
         {
             BridgeMethod method;
             if (!TryGet(name, out method))
-                return Error("UNKNOWN_METHOD", "No such bridge method: " + name);
+                return Serialize(Error("UNKNOWN_METHOD", "No such bridge method: " + name), id, hasId);
 
             int timeoutMs = timeoutMsOverride > 0 ? timeoutMsOverride : method.DefaultTimeoutMs;
 
             try
             {
-                object result = method.RequiresMainThread
-                    ? MainThread.Run(delegate { return method.Handler(args); }, timeoutMs)
-                    : method.Handler(args);
+                if (method.RequiresMainThread)
+                {
+                    return MainThread.Run(delegate
+                    {
+                        object result = method.Handler(args);
+                        return Serialize(new Dictionary<string, object> { { "ok", true }, { "result", result } }, id, hasId);
+                    }, timeoutMs);
+                }
 
-                return new Dictionary<string, object> { { "ok", true }, { "result", result } };
+                // Off-main-thread methods return plain data by contract (health counters, job records),
+                // so serialising here is safe.
+                object offThread = method.Handler(args);
+                return Serialize(new Dictionary<string, object> { { "ok", true }, { "result", offThread } }, id, hasId);
             }
             catch (MainThreadBusyException ex)
             {
-                return Error("EDITOR_BUSY", ex.Message);
+                return Serialize(Error("EDITOR_BUSY", ex.Message), id, hasId);
             }
             catch (BridgeHandlerException ex)
             {
                 var inner = ex.InnerException ?? ex;
-                return Error("HANDLER_ERROR", inner.Message, inner.StackTrace);
+                return Serialize(Error("HANDLER_ERROR", inner.Message, inner.StackTrace), id, hasId);
             }
             catch (Exception ex)
             {
-                return Error("HANDLER_ERROR", ex.GetType().Name + ": " + ex.Message, ex.StackTrace);
+                return Serialize(Error("HANDLER_ERROR", ex.GetType().Name + ": " + ex.Message, ex.StackTrace), id, hasId);
             }
+        }
+
+        private static string Serialize(Dictionary<string, object> response, object id, bool hasId)
+        {
+            if (hasId) response["id"] = id;
+            return Json.Write(response, 12);
         }
 
         public static Dictionary<string, object> Error(string code, string message, string stack = null)

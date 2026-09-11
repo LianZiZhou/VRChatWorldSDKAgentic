@@ -54,15 +54,25 @@ namespace Agentic.Vrcw.Bridge
             var uo = v as UnityEngine.Object;
             if (uo != null)
             {
-                bool alive = uo;
                 sb.Append('{');
                 sb.Append("\"__unity\":"); WriteString(sb, t.FullName);
-                sb.Append(",\"name\":"); WriteString(sb, alive ? uo.name : "<destroyed>");
-                sb.Append(",\"instanceId\":").Append(alive ? uo.GetInstanceID() : 0);
-                var go = v as GameObject;
-                var comp = v as Component;
-                if (alive && go != null) { sb.Append(",\"path\":"); WriteString(sb, HierarchyPath(go.transform)); }
-                else if (alive && comp != null) { sb.Append(",\"path\":"); WriteString(sb, HierarchyPath(comp.transform)); }
+                try
+                {
+                    bool alive = uo;
+                    sb.Append(",\"name\":"); WriteString(sb, alive ? uo.name : "<destroyed>");
+                    sb.Append(",\"instanceId\":").Append(alive ? uo.GetInstanceID() : 0);
+                    var go = v as GameObject;
+                    var comp = v as Component;
+                    if (alive && go != null) { sb.Append(",\"path\":"); WriteString(sb, HierarchyPath(go.transform)); }
+                    else if (alive && comp != null) { sb.Append(",\"path\":"); WriteString(sb, HierarchyPath(comp.transform)); }
+                }
+                catch (Exception ex)
+                {
+                    // Reading even `name` off Unity's main thread throws. The router serialises
+                    // main-thread results on the main thread precisely to avoid this; this guard keeps a
+                    // stray off-thread serialisation from failing an otherwise good response.
+                    sb.Append(",\"error\":"); WriteString(sb, ex.GetType().Name + ": " + ex.Message);
+                }
                 sb.Append('}');
                 return;
             }

@@ -49,9 +49,40 @@ namespace Agentic.Vrcw.Bridge
 
             BridgeMethods.RegisterAll();
 
-            // Defer the actual bind by one tick: during the static constructor the editor is still
-            // mid-reload and Application.dataPath-derived paths are unreliable.
-            EditorApplication.delayCall += Start;
+            // Bind immediately rather than deferring to EditorApplication.delayCall.
+            //
+            // An earlier version used delayCall, and after one domain reload it simply never fired: the
+            // assembly compiled and loaded, yet the bridge never rebound and the editor became
+            // unreachable with nothing in the log. Binding an HttpListener needs no Unity main loop, so
+            // there is no reason to make startup depend on one.
+            Start();
+
+            // Self-healing second chance. If the bind above lost a port race, or ran before the editor
+            // could answer Application.dataPath, this retries until it works. An unreachable bridge is
+            // indistinguishable from a dead editor from outside, so it must not be a one-shot.
+            EditorApplication.update -= EnsureStarted;
+            EditorApplication.update += EnsureStarted;
+        }
+
+        private static double _nextRetryAt;
+        private static int _failedStarts;
+
+        private static void EnsureStarted()
+        {
+            if (_running) return;
+            if (EditorApplication.timeSinceStartup < _nextRetryAt) return;
+            _nextRetryAt = EditorApplication.timeSinceStartup + 2.0;
+
+            Start();
+            if (_running)
+            {
+                _failedStarts = 0;
+                return;
+            }
+
+            // Report sparsely: a per-tick error would bury the console.
+            if (++_failedStarts % 30 == 1)
+                Debug.LogWarning("[agentic-vrcw] Bridge is not listening; retrying. Attempt " + _failedStarts + ".");
         }
 
         public static int Port { get { return _port; } }
@@ -234,17 +265,23 @@ namespace Agentic.Vrcw.Bridge
             var args = Json.AsObject(rawParams);
             int timeoutMs = Json.GetInt(request, "timeoutMs", 0);
 
-            var response = BridgeRouter.Invoke(method, args, timeoutMs);
             object id;
-            if (request.TryGetValue("id", out id)) response["id"] = id;
+            bool hasId = request.TryGetValue("id", out id);
 
-            bool ok = response.ContainsKey("ok") && response["ok"] is bool && (bool)response["ok"];
-            Respond(ctx, ok ? 200 : 200, response); // protocol-level errors ride a 200 with ok:false
+            // Already-serialised JSON: the router does it on the main thread so live Unity objects in a
+            // result can be read safely. Protocol-level errors ride a 200 with ok:false.
+            string json = BridgeRouter.InvokeToJson(method, args, timeoutMs, id, hasId);
+            RespondJson(ctx, 200, json);
         }
 
         private static void Respond(HttpListenerContext ctx, int status, object payload)
         {
-            byte[] bytes = Encoding.UTF8.GetBytes(Json.Write(payload, 12));
+            RespondJson(ctx, status, Json.Write(payload, 12));
+        }
+
+        private static void RespondJson(HttpListenerContext ctx, int status, string json)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
             ctx.Response.StatusCode = status;
             ctx.Response.ContentType = "application/json; charset=utf-8";
             ctx.Response.ContentLength64 = bytes.Length;

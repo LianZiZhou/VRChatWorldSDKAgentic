@@ -16,10 +16,18 @@ Unity's own MCP requires Unity 6, which VRChat does not support. See [docs/ARCHI
 
 ## Status
 
-**M0 complete and verified against a live editor** (`20/20` in `tests/m0-smoke.mjs`), including recovery
-from an unplanned editor kill.
+**M0 and M1 complete and verified against a live editor.**
 
-Working today:
+| Suite | Covers | Result |
+|---|---|---|
+| `tests/m0-smoke.mjs` | bridge transport, eval, reflection, jobs | 20/20 |
+| `tests/m1-udon.mjs` | the whole UdonSharp authoring loop | 14/14 |
+| `tests/mcp-handshake.mjs` | MCP stdio protocol and tool surface | 6/6 |
+
+M0 also verified recovery from an unplanned editor kill: the supervisor relaunched once, and the full
+acceptance suite passed against the recovered editor.
+
+### Foundation (M0)
 
 | Tool | Purpose |
 |---|---|
@@ -32,8 +40,21 @@ Working today:
 | `unity_menu_item`, `unity_refresh_assets` | editor actions |
 | `unity_job_submit/status/list/cancel/wait` | long-running work as pollable jobs |
 
-Not yet built: everything VRChat-authoring (M1–M5) — UdonSharp compile/attach/lint, scene scaffolding and
-validation, budget checks, ClientSim verification, asset pipeline.
+### UdonSharp authoring (M1)
+
+| Tool | Purpose |
+|---|---|
+| `udon_status` | program assets, error state, last compile diagnostics |
+| `udon_create_script` | write a `.cs` and create its program asset (two-pass, idempotent) |
+| `udon_compile` | compile with structured diagnostics; checks C# errors first and runs the upgrade pass |
+| `udon_attach` | attach a behaviour and wire its hidden backing `UdonBehaviour` |
+| `udon_set_fields` | set fields **and** `CopyProxyToUdon`, so values actually ship |
+| `udon_read_vars` | read proxy *and* `UdonBehaviour` values, so a failed copy is visible |
+| `udon_list_behaviours` | every behaviour in the loaded scenes |
+
+Still to build: scene scaffolding and SDK validation (M2), ClientSim and multi-client verification (M3),
+dual-platform budget and asset pipeline (M4), checkpointing and skills (M5). The out-of-Unity Roslyn
+linter (`packages/udon-analyzer`) is also still pending.
 
 ## Setup
 

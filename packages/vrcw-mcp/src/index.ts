@@ -295,6 +295,144 @@ tool(
   }
 );
 
+// ---------------------------------------------------------------- udonsharp
+
+tool(
+  "udon_status",
+  "UdonSharp program assets, whether any script has an error, and the last compile's structured diagnostics.",
+  { ...projectArg },
+  async (a) => rpc("udon.status", {}, { project: a.project })
+);
+
+tool(
+  "udon_create_script",
+  "Write an UdonSharpBehaviour .cs file and create its program asset.\n" +
+    "Deliberately a two-pass operation, because nothing in the SDK auto-creates a program asset and the " +
+    "asset can only be linked once Unity has compiled the script: call it once to write the file, let " +
+    "Unity compile (unity_refresh_assets then poll unity_compile_status), then call it again with the same " +
+    "arguments — it is idempotent — and it creates the program asset. The response's nextStep says which " +
+    "pass you are on.\n" +
+    "UdonSharp requires the class name to equal the file name, so className must match the class in code.",
+  {
+    ...projectArg,
+    className: z.string().describe("Class name; also the file name."),
+    code: z.string().optional().describe("Full file contents. Omitted: a minimal UdonSharpBehaviour template."),
+    folder: z.string().optional().describe("Target folder under Assets/. Default Assets/Udon."),
+    createProgramAsset: z.boolean().optional(),
+  },
+  async (a) =>
+    rpc(
+      "udon.create_script",
+      { className: a.className, code: a.code, folder: a.folder, createProgramAsset: a.createProgramAsset ?? true },
+      { project: a.project, timeoutMs: 120_000 }
+    )
+);
+
+tool(
+  "udon_compile",
+  "Compile all UdonSharp programs and return structured diagnostics, waiting for completion.\n" +
+    "Checks Unity's own C# compile first and reports those errors instead: UdonSharpCompilerV1 silently " +
+    "does nothing while the project has C# errors, so skipping that check yields a compile that reports " +
+    "neither success nor failure. Also runs the upgrade pass, which fresh program assets need before " +
+    "their fields can be written.",
+  {
+    ...projectArg,
+    isEditorBuild: z.boolean().optional().describe("False compiles as for an upload. Default true."),
+    waitMs: z.number().int().min(5000).max(1_800_000).optional(),
+  },
+  async (a) => {
+    const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
+    const budget = a.waitMs ?? 600_000;
+
+    const runOnce = async () => {
+      const job: any = await rpc("job.submit", { kind: "udon.compile", params: { isEditorBuild: a.isEditorBuild ?? true } }, { project: a.project });
+      const deadline = Date.now() + budget;
+      let last: any = job;
+      while (Date.now() < deadline) {
+        try {
+          last = await rpc("job.status", { id: job.id }, { project: a.project, timeoutMs: 20_000 });
+          if (terminal.has(String(last.state))) return last;
+        } catch (err) {
+          if (err instanceof BridgeError && err.code !== "EDITOR_BUSY") throw err;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      return { ...last, timedOut: true };
+    };
+
+    let result = await runOnce();
+    // The upgrade pass rewrites assets and can trigger a domain reload that interrupts the job. One
+        // automatic retry is the documented response and saves the caller a round trip.
+    const needsRetry =
+      String(result.state) === "interrupted" || (result.result && result.result.stage === "upgrade");
+    if (needsRetry) {
+      result = await runOnce();
+      (result as any).retriedAfterUpgradePass = true;
+    }
+    return result;
+  }
+);
+
+tool(
+  "udon_attach",
+  "Attach an UdonSharpBehaviour to a GameObject, creating and wiring its hidden backing UdonBehaviour. " +
+    "Idempotent: reports the existing component rather than adding a second. Requires the script to be " +
+    "compiled and to have a program asset.",
+  {
+    ...projectArg,
+    gameObject: z.string().describe('Hierarchy path, e.g. "VRCWorld/Door". Inactive objects are found too.'),
+    type: z.string().describe("Behaviour class name."),
+    saveScene: z.boolean().optional(),
+  },
+  async (a) =>
+    rpc("udon.attach", { gameObject: a.gameObject, type: a.type, saveScene: a.saveScene ?? false }, { project: a.project })
+);
+
+tool(
+  "udon_set_fields",
+  "Set public fields on an attached UdonSharpBehaviour and copy them onto the backing UdonBehaviour.\n" +
+    "Always use this rather than writing the component through a generic Unity tool: values set only on " +
+    "the proxy MonoBehaviour never reach the backing UdonBehaviour, so they are silently missing at " +
+    "runtime and in the uploaded world. This runs CopyProxyToUdon for you.\n" +
+    "Object references are named explicitly: { \"$gameObject\": \"VRCWorld/Door\" }, " +
+    '{ "$component": { "path": "...", "type": "Animator" } }, { "$asset": "Assets/M.mat" }. ' +
+    "Vectors and colours accept {x,y,z} / {r,g,b,a} or an array.",
+  {
+    ...projectArg,
+    gameObject: z.string(),
+    type: z.string(),
+    fields: z.record(z.any()).describe("Field name to value."),
+    saveScene: z.boolean().optional().describe("Default true."),
+  },
+  async (a) =>
+    rpc(
+      "udon.set_fields",
+      { gameObject: a.gameObject, type: a.type, fields: a.fields, saveScene: a.saveScene ?? true },
+      { project: a.project }
+    )
+);
+
+tool(
+  "udon_read_vars",
+  "Read a behaviour's values from both the proxy and the backing UdonBehaviour. Use it to verify writes " +
+    "landed: mismatchCount > 0 means the values were never copied to Udon and will not exist at runtime.",
+  {
+    ...projectArg,
+    gameObject: z.string(),
+    type: z.string(),
+    names: z.array(z.string()).optional().describe("Omit for every public field."),
+  },
+  async (a) =>
+    rpc("udon.read_vars", { gameObject: a.gameObject, type: a.type, names: a.names ?? [] }, { project: a.project })
+);
+
+tool(
+  "udon_list_behaviours",
+  "Every UdonSharpBehaviour in the loaded scenes, with GameObject path and whether its program asset is linked.",
+  { ...projectArg },
+  async (a) => rpc("udon.list_behaviours", {}, { project: a.project })
+);
+
 // ---------------------------------------------------------------- boot
 
 async function main(): Promise<void> {
