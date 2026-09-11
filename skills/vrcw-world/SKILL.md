@@ -129,3 +129,51 @@ the proxy so the values survive a build, which generic component editing does no
 
 If the generic tools are missing or report no editor, call `companion_status` — it names the cause, which is
 always one of two things, and `companion_setup` fixes both.
+
+## Pickups, stations and video screens
+
+The three components that carry their own traps.
+
+**A pickup** needs `VRCPickup` plus a `Rigidbody` and a collider; without the Rigidbody Unity refuses to add
+the component at all. Gravity on means the prop settles wherever physics puts it, which is usually what a
+world wants and never what a test wants. The Udon side is `OnPickup` / `OnDrop`, parameterless.
+
+**A station** needs `VRCStation` with `stationEnterPlayerLocation` and `stationExitPlayerLocation` transforms
+— without them ClientSim warns and the player has nowhere to go. `PlayerMobility` is `Mobile`, `Immobilize`
+or `ImmobilizeForVehicle`. The Udon side is `OnStationEntered(VRCPlayerApi)` / `OnStationExited(VRCPlayerApi)`,
+and both fire for **remote** players too — guard local-only UI with `player.isLocal`.
+
+**A video screen** is the one with a genuine trap: `UnityEngine.Video.VideoPlayer` is **not** on VRChat's
+component whitelist, so adding one gets it silently stripped from the built world. Use
+`VRC.SDK3.Video.Components.VRCUnityVideoPlayer` alone — it creates its own player at runtime, which is why
+its `_unityPlayer` field is not even serialized. What you do wire is private `[SerializeField]` state that
+`scene_apply_spec` can set: `renderMode` (`RenderTexture` or `MaterialOverride`), `targetMaterialRenderer`,
+`targetMaterialProperty` (`_MainTex`), `targetAudioSources`, `aspectRatio`, `maximumResolution`, `videoURL`.
+`scene_apply_spec` warns about anything not whitelisted — believe the warning; it is the SDK's own list.
+
+In Udon, the field type is `BaseVRCVideoPlayer`, not `VRCUnityVideoPlayer`: only the base is exposed to
+Udon. Its API is `PlayURL(VRCUrl)`, `LoadURL`, `Play`, `Stop`, `Pause`, `GetTime`, `SetTime`, `GetDuration`,
+`IsPlaying`, `IsReady`, `Loop`. Events are `OnVideoStart`, `OnVideoEnd`, `OnVideoReady`, `OnVideoLoop`,
+`OnVideoPause`, `OnVideoPlay` and `OnVideoError(VideoError)`.
+
+**URLs cannot be built at runtime.** `VRCUrl` has no Udon-exposed constructor, so every URL a world can play
+has to exist as a field before the build. Set them from the editor: `udon_set_fields` turns a plain string
+into a `VRCUrl`, and so does `scene_apply_spec` for the component's own `videoURL`.
+
+## Proving interactions actually work
+
+`verify_clientsim` drives a real player, so these are tested rather than assumed:
+
+```
+interact            the use action, through the behaviour's Interact entry point
+grab / drop         picks the object up with ClientSim's own hand, so OnPickup and OnDrop really fire
+sit / stand         puts the local player into a VRCStation, firing OnStationEntered / OnStationExited
+assert_held         is this pickup held, as ClientSim reports it
+assert_in_station   is this station occupied
+send_event          any Udon event by its entry-point name, including built-ins: _onVideoStart, _onVideoEnd
+```
+
+Two limits worth knowing. `grab` and `interact` do not check reachability — the hand takes the object
+wherever it is, so "can a player actually get to it" stays `scene_spatial_audit`'s question. And video
+playback needs the network, so scenarios drive `_onVideoStart` / `_onVideoEnd` and check the world's reaction
+rather than streaming anything.

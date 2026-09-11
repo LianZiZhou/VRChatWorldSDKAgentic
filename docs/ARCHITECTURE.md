@@ -199,6 +199,29 @@ fixed with `--startup-grace` (default 300s).
 - Udon cannot emit telemetry outbound (`VRCUrl` is not constructible at runtime), so `Debug.Log` is the
   only channel; the plan is tagged lines (`[AGENTTEL]{json}`) parsed from those logs.
 
+### Driving a player, not faking one
+
+A scenario that only sends Udon events proves that the code runs, not that the world works. Two interactions
+need an actual player, and both are reachable:
+
+- **Stations.** `ClientSimStationHelper.UseStation(VRCStation, VRCPlayerApi)` and `ExitStation` are public
+  statics, and they are the same entry points `VRCStation.UseStation` goes through in ClientSim — so a
+  scripted sit is indistinguishable from a player sitting down, `OnStationEntered` and all.
+- **Pickups.** `ClientSimPlayerHand.Pickup` is private, and the grab path is driven by device input events
+  that no public API raises. The choice was between reflecting into that one method or invoking the Udon
+  events directly, and invoking them directly would prove nothing: the point of the step is that ClientSim's
+  own pickup machinery runs, the hand takes the object, `VRC_Pickup` state updates, and the events fire from
+  there. So: reflection, with the signature checked and a readable error if a future SDK moves it.
+
+Neither step checks reachability — the hand takes the object wherever it is, exactly as `interact` invokes a
+behaviour without asking whether a player could aim at it. Proving someone can walk up to a thing is
+`scene.spatial_audit`'s job, and keeping the two apart is what stops a behaviour test from quietly becoming a
+geometry test.
+
+Video is the third case and it stops short deliberately: playback needs the network and a `VRCUrl` that Udon
+cannot construct at runtime, so scenarios drive `_onVideoStart` / `_onVideoEnd` and assert the world's
+reaction. The player component itself is covered by being wired, whitelisted, and surviving the build.
+
 ## 9. UdonSharp ordering constraints (for M1)
 
 Three traps that dictate the shape of the M1 tools:
@@ -293,6 +316,19 @@ The same principle applies to the Udon exposure whitelist and the syncable-type 
 installed SDK (`UdonEditorManager.GetNodeDefinitions`, `UdonNetworkTypes.CanSync`) rather than transcribed.
 `tests/m5-lint-whitelist.mjs` cross-checks the linter's own hardcoded sync table against the SDK, so the two
 cannot quietly disagree.
+
+### The component whitelist is not advisory
+
+`WorldValidation.ComponentTypeWhiteList{Common,Sdk3}` — 311 entries in SDK 3.10.5 — is applied at build time
+by deleting everything not on it. A stripped component leaves no error and no log line; the world simply
+does less than it did in the editor.
+
+The case that proves the point: `UnityEngine.Video.VideoPlayer` is **not** whitelisted. A video screen
+assembled the way Unity documentation suggests builds, uploads, and does nothing.
+`VRCUnityVideoPlayer` is whitelisted and creates its own player at runtime, which is why its `_unityPlayer`
+field is not serialized at all. `scene.apply_spec` checks every component it adds against the live list and
+warns; the end-to-end test treats such a warning as a failure, which is how that mistake was caught here
+rather than in a built world.
 
 ## 14. Geometry checks have to earn their keep
 

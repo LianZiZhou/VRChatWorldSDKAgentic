@@ -2,13 +2,22 @@
 /**
  * End-to-end: build and verify a small interactive VRChat world using only the tool surface.
  *
- * This is the acceptance criterion for the whole toolchain. Nothing here touches Unity by hand — every step
- * is a call an agent could make — and it runs the full pipeline in the order the SDK actually requires:
+ * This is the acceptance criterion for the whole toolchain, and the world it builds is the one the plan
+ * specified: a button that opens a door, a counter synchronised across players, a video player, and a prop
+ * that can be picked up — plus a chair, because entering a station is the other interaction a world
+ * routinely gets wrong. Nothing here touches Unity by hand — every step is a call an agent could make — and
+ * it runs the full pipeline in the order the SDK actually requires:
  *
  *   checkpoint -> harden editor -> fix project -> scaffold scene -> generate architecture
- *   -> lint (no Unity) -> write script -> compile -> attach -> set fields
+ *   -> place objects and SDK components declaratively
+ *   -> lint (no Unity) -> write scripts -> compile -> attach -> wire fields
  *   -> audit geometry -> photograph -> budget both platforms
- *   -> verify behaviour in ClientSim -> build a real .vrcw -> checkpoint
+ *   -> verify behaviour in ClientSim (interact, grab, drop, sit, stand, video callbacks)
+ *   -> build a real .vrcw -> checkpoint
+ *
+ * What the ClientSim pass deliberately does not do is stream the video. Playback needs the network and a URL
+ * Udon cannot construct at runtime, so the scenario drives the player's callbacks and checks the world reacts
+ * correctly; the player component itself is verified by being wired, whitelisted, and surviving the build.
  */
 import { existsSync, statSync } from "node:fs";
 import { rpc } from "../packages/vrcw-mcp/dist/bridge.js";
@@ -22,9 +31,26 @@ const here = dirname(fileURLToPath(import.meta.url));
 const PROJECT = process.env.VRCW_PROJECT ?? "E:/Unity/WorldTest";
 const SCENE = "Assets/Scenes/AgenticE2E.unity";
 const CLASS = "AgenticE2ECounter";
+const PROP_CLASS = "AgenticE2EProp";
+const CHAIR_CLASS = "AgenticE2EChair";
+const VIDEO_CLASS = "AgenticE2EVideo";
+
 const ROOM = "World/Room";
 const BUTTON = "World/Button";
 const DISPLAY = "World/Display";
+const DOOR = "World/Door";
+const PROP = "World/Prop";
+const PROP_GLOW = "World/Prop/Glow";
+const CHAIR = "World/Chair";
+const CHAIR_ENTER = "World/Chair/Enter";
+const CHAIR_EXIT = "World/Chair/Exit";
+const CHAIR_MENU = "World/Chair/Menu";
+const SCREEN = "World/Screen";
+const SCREEN_ON = "World/Screen/Playing";
+
+// The door slides aside rather than switching off, so "open" is a position a scenario can measure.
+const DOOR_CLOSED = [0, 1.1, 5.1];
+const DOOR_OPEN = [2.1, 1.1, 5.1];
 
 const analyzer = join(here, "..", "packages", "udon-analyzer", "bin", "Release", "net8.0",
   process.platform === "win32" ? "udon-analyzer.exe" : "udon-analyzer");
@@ -94,6 +120,9 @@ using VRC.SDKBase;
 public class ${CLASS} : UdonSharpBehaviour
 {
     public GameObject display;
+    public Transform door;
+    public Vector3 doorClosed;
+    public Vector3 doorOpen;
     public int step;
 
     [UdonSynced] public int count;
@@ -117,9 +146,142 @@ public class ${CLASS} : UdonSharpBehaviour
         // only channel verify_multiclient can read back.
         Debug.Log("[AGENTTEL]{\\"counter\\":" + count + "}");
         if (display != null) display.SetActive(count > 0);
+        // Odd presses leave the door open, so the door's position is the observable effect of the count.
+        if (door != null) door.localPosition = (count % 2 == 1) ? doorOpen : doorClosed;
     }
 }
 `;
+
+/** A prop that can be picked up, which reports who is holding it. */
+const PROP_SOURCE = `using UdonSharp;
+using UnityEngine;
+using VRC.SDKBase;
+
+[UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
+public class ${PROP_CLASS} : UdonSharpBehaviour
+{
+    public GameObject glow;
+
+    [UdonSynced] public bool held;
+    [UdonSynced] public int pickupCount;
+
+    public override void OnPickup()
+    {
+        Networking.SetOwner(Networking.LocalPlayer, gameObject);
+        held = true;
+        pickupCount = pickupCount + 1;
+        RequestSerialization();
+        _Apply();
+    }
+
+    public override void OnDrop()
+    {
+        held = false;
+        RequestSerialization();
+        _Apply();
+    }
+
+    public override void OnDeserialization()
+    {
+        _Apply();
+    }
+
+    private void _Apply()
+    {
+        Debug.Log("[AGENTTEL]{\\"prop\\":{\\"held\\":" + (held ? "true" : "false") + ",\\"pickups\\":" + pickupCount + "}}");
+        if (glow != null) glow.SetActive(held);
+    }
+}
+`;
+
+/** A chair that shows a menu to whoever sits in it. */
+const CHAIR_SOURCE = `using UdonSharp;
+using UnityEngine;
+using VRC.SDKBase;
+
+[UdonBehaviourSyncMode(BehaviourSyncMode.None)]
+public class ${CHAIR_CLASS} : UdonSharpBehaviour
+{
+    public GameObject menu;
+    public int sitCount;
+
+    public override void OnStationEntered(VRCPlayerApi player)
+    {
+        // Station events fire for remote players too, and the menu is local UI, so only the local player's
+        // entry should touch it.
+        if (player == null || !player.isLocal) return;
+        sitCount = sitCount + 1;
+        if (menu != null) menu.SetActive(true);
+        Debug.Log("[AGENTTEL]{\\"chair\\":{\\"seated\\":true,\\"sits\\":" + sitCount + "}}");
+    }
+
+    public override void OnStationExited(VRCPlayerApi player)
+    {
+        if (player == null || !player.isLocal) return;
+        if (menu != null) menu.SetActive(false);
+        Debug.Log("[AGENTTEL]{\\"chair\\":{\\"seated\\":false,\\"sits\\":" + sitCount + "}}");
+    }
+}
+`;
+
+/** A video screen: interact to start or stop, and react to the player's own callbacks. */
+const VIDEO_SOURCE = `using UdonSharp;
+using UnityEngine;
+using VRC.SDK3.Components.Video;
+using VRC.SDK3.Video.Components.Base;
+using VRC.SDKBase;
+
+[UdonBehaviourSyncMode(BehaviourSyncMode.None)]
+public class ${VIDEO_CLASS} : UdonSharpBehaviour
+{
+    public BaseVRCVideoPlayer videoPlayer;
+    public GameObject playingIndicator;
+
+    // Udon cannot build a VRCUrl at runtime, which is why every video world carries its URLs as fields.
+    public VRCUrl url;
+
+    public bool isPlaying;
+
+    public override void Interact()
+    {
+        if (videoPlayer == null) return;
+        if (isPlaying) videoPlayer.Stop();
+        else videoPlayer.PlayURL(url);
+    }
+
+    public override void OnVideoStart()
+    {
+        isPlaying = true;
+        _Apply();
+    }
+
+    public override void OnVideoEnd()
+    {
+        isPlaying = false;
+        _Apply();
+    }
+
+    public override void OnVideoError(VideoError videoError)
+    {
+        isPlaying = false;
+        Debug.Log("[AGENTTEL]{\\"video\\":{\\"error\\":\\"" + videoError.ToString() + "\\"}}");
+        _Apply();
+    }
+
+    private void _Apply()
+    {
+        Debug.Log("[AGENTTEL]{\\"video\\":{\\"playing\\":" + (isPlaying ? "true" : "false") + "}}");
+        if (playingIndicator != null) playingIndicator.SetActive(isPlaying);
+    }
+}
+`;
+
+const SCRIPTS = [
+  { className: CLASS, source: SOURCE },
+  { className: PROP_CLASS, source: PROP_SOURCE },
+  { className: CHAIR_CLASS, source: CHAIR_SOURCE },
+  { className: VIDEO_CLASS, source: VIDEO_SOURCE },
+];
 
 try {
   // ------------------------------------------------------------------ prepare
@@ -166,47 +328,134 @@ try {
     return `${room.pieceCount} pieces, ~${room.approximateTriangles} tris`;
   });
 
-  await step("place the interactive objects declaratively", async () => {
+  await step("place every interactive object declaratively", async () => {
     const applied = await rpc("scene.apply_spec", {
       objects: [
+        // The button, its readout, and the door it drives.
         { path: BUTTON, primitive: "Cube", position: [0, 1.2, 3], scale: [0.4, 0.4, 0.15] },
         { path: DISPLAY, primitive: "Sphere", position: [0, 2.2, 3], scale: [0.5, 0.5, 0.5], active: false },
+        { path: DOOR, primitive: "Cube", position: DOOR_CLOSED, scale: [1.8, 2.2, 0.2] },
+
+        // A prop to carry. VRCPickup needs a Rigidbody; gravity is off so the prop stays where it is put
+        // instead of settling mid-scenario and moving the assertions under our feet.
+        {
+          path: PROP, primitive: "Cube", position: [2, 1, 0], scale: [0.3, 0.3, 0.3],
+          components: [
+            { type: "UnityEngine.Rigidbody", fields: { useGravity: false } },
+            {
+              type: "VRC.SDK3.Components.VRCPickup",
+              fields: { pickupable: true, proximity: 2, InteractionText: "Take" },
+            },
+          ],
+        },
+        { path: PROP_GLOW, primitive: "Sphere", position: [2, 1.4, 0], scale: [0.15, 0.15, 0.15], active: false },
+
+        // A chair. A station needs somewhere to put the player on entry and somewhere to leave them on exit.
+        { path: CHAIR, primitive: "Cube", position: [-2, 0.5, 0], scale: [0.6, 0.1, 0.6] },
+        { path: CHAIR_ENTER, position: [-2, 0.6, 0] },
+        { path: CHAIR_EXIT, position: [-2.8, 0.1, 0] },
+        { path: CHAIR_MENU, primitive: "Quad", position: [-2, 1.6, 0], scale: [0.8, 0.5, 1], active: false },
+
+        // A video screen: the Unity player, its audio, and VRChat's wrapper around them.
+        { path: SCREEN, primitive: "Quad", position: [0, 2, -4.8], scale: [4, 2.25, 1] },
+        { path: SCREEN_ON, primitive: "Sphere", position: [2.2, 2, -4.8], scale: [0.2, 0.2, 0.2], active: false },
       ],
       saveScene: true,
     }, { timeoutMs: 180_000 });
     assert(applied.warnings.length === 0, `warnings: ${JSON.stringify(applied.warnings)}`);
-    return `created ${applied.created.length}, updated ${applied.updated.length}`;
+
+    // A second pass for the components that reference objects created in the first.
+    const wired = await rpc("scene.apply_spec", {
+      objects: [
+        {
+          path: CHAIR,
+          components: [
+            {
+              type: "VRC.SDK3.Components.VRCStation",
+              fields: {
+                stationEnterPlayerLocation: { $gameObject: CHAIR_ENTER },
+                stationExitPlayerLocation: { $gameObject: CHAIR_EXIT },
+                PlayerMobility: "Immobilize",
+                seated: true,
+                canUseStationFromStation: true,
+                disableStationExit: false,
+              },
+            },
+          ],
+        },
+        {
+          path: SCREEN,
+          components: [
+            // No UnityEngine.Video.VideoPlayer here, deliberately: it is not on VRChat's component
+            // whitelist and would be stripped out of the built world. VRCUnityVideoPlayer creates its own
+            // player at runtime, which is why its _unityPlayer field is not even serialized.
+            { type: "UnityEngine.AudioSource", fields: { playOnAwake: false, spatialBlend: 1 } },
+            {
+              type: "VRC.SDK3.Video.Components.VRCUnityVideoPlayer",
+              // All of this is private [SerializeField] wiring — the inspector's job, and with it a screen
+              // that actually renders and plays sound rather than a component with nothing attached.
+              fields: {
+                renderMode: "MaterialOverride",
+                targetMaterialRenderer: { $component: { path: SCREEN, type: "UnityEngine.MeshRenderer" } },
+                targetMaterialProperty: "_MainTex",
+                targetAudioSources: [{ $component: { path: SCREEN, type: "UnityEngine.AudioSource" } }],
+                aspectRatio: "FitInside",
+                maximumResolution: 720,
+                videoURL: "https://example.com/agentic-e2e.mp4",
+                loop: false,
+                autoPlay: false,
+                EnableAutomaticResync: true,
+              },
+            },
+          ],
+        },
+      ],
+      saveScene: true,
+    }, { timeoutMs: 180_000 });
+    assert(wired.warnings.length === 0, `component warnings: ${JSON.stringify(wired.warnings)}`);
+
+    const components = [...(applied.componentsAdded ?? []), ...(wired.componentsAdded ?? [])]
+      .map((c) => String(c.type).split(".").pop());
+    return `${applied.created.length + wired.created.length} created, ` +
+      `${applied.updated.length + wired.updated.length} updated; components: ${components.join(", ")}`;
   });
 
   // ------------------------------------------------------------------ the script
 
-  await step("lint the script before Unity ever sees it", async () => {
+  await step("lint every script before Unity ever sees it", async () => {
     mkdirSync(join(here, "fixtures"), { recursive: true });
-    const staged = join(here, "fixtures", `${CLASS}.cs`);
-    writeFileSync(staged, SOURCE);
+    const staged = SCRIPTS.map(({ className, source }) => {
+      const file = join(here, "fixtures", `${className}.cs`);
+      writeFileSync(file, source);
+      return file;
+    });
 
-    const result = spawnSync(analyzer, ["--json", staged], { encoding: "utf8", timeout: 120_000 });
+    const result = spawnSync(analyzer, ["--json", ...staged], { encoding: "utf8", timeout: 120_000 });
     const report = JSON.parse(result.stdout);
-    assert(report.errorCount === 0, `linter rejected the script: ${JSON.stringify(report.diagnostics)}`);
-    // Milliseconds, versus the tens of seconds a Unity round trip costs.
-    return `clean in the linter (${report.warningCount} warning(s)), no Unity round trip spent`;
+    assert(report.errorCount === 0, `linter rejected a script: ${JSON.stringify(report.diagnostics)}`);
+    // Milliseconds, versus the tens of seconds a Unity round trip costs - per script.
+    return `${staged.length} scripts clean in the linter (${report.warningCount} warning(s)), no Unity round trip spent`;
   });
 
-  await step("write the script and let Unity compile it", async () => {
-    const first = await rpc("udon.create_script",
-      { className: CLASS, folder: "Assets/Udon", code: SOURCE }, { timeoutMs: 120_000 });
+  await step("write the scripts and let Unity compile them", async () => {
+    for (const { className, source } of SCRIPTS) {
+      await rpc("udon.create_script", { className, folder: "Assets/Udon", code: source }, { timeoutMs: 120_000 });
+    }
+    // One refresh for all four: separately they would each cost a domain reload, and they compile together.
     await rpc("unity.refresh_assets", { saveAssets: true, forceSynchronous: true }, { timeoutMs: 180_000 }).catch(() => {});
     const compiled = await waitForIdle();
     assert(compiled.errorCount === 0, `C# errors: ${JSON.stringify(compiled.diagnostics?.slice(0, 3))}`);
 
-    // Second pass creates the program asset, which can only be linked once the type exists.
-    const second = await rpc("udon.create_script",
-      { className: CLASS, folder: "Assets/Udon", code: SOURCE }, { timeoutMs: 120_000 });
-    assert(second.programAssetExists, "program asset was not created");
-    return `wrote ${first.scriptPath}, program asset ${second.programAssetExists ? "ready" : "missing"}`;
+    // Second pass creates the program assets, which can only be linked once the types exist.
+    for (const { className, source } of SCRIPTS) {
+      const second = await rpc("udon.create_script", { className, folder: "Assets/Udon", code: source },
+        { timeoutMs: 120_000 });
+      assert(second.programAssetExists, `program asset was not created for ${className}`);
+    }
+    return `${SCRIPTS.length} scripts written, program assets ready`;
   });
 
-  await step("compile the Udon program", async () => {
+  await step("compile the Udon programs", async () => {
     let job = await runJob("udon.compile", {});
     if (job.state === "interrupted" || job.result?.stage === "upgrade") {
       await waitForIdle();
@@ -216,21 +465,61 @@ try {
     return `stage=${job.result.stage} errors=${job.result.errorCount}`;
   });
 
-  await step("attach the behaviour and wire its fields", async () => {
-    const attached = await rpc("udon.attach", { gameObject: BUTTON, type: CLASS }, { timeoutMs: 60_000 });
-    assert(attached.programAssetLinked, "program asset not linked");
+  await step("attach the behaviours and wire their fields", async () => {
+    const wiring = [
+      {
+        gameObject: BUTTON, type: CLASS,
+        fields: {
+          step: 1, count: 0,
+          display: { $gameObject: DISPLAY },
+          door: { $gameObject: DOOR },
+          doorClosed: DOOR_CLOSED,
+          doorOpen: DOOR_OPEN,
+        },
+      },
+      { gameObject: PROP, type: PROP_CLASS, fields: { glow: { $gameObject: PROP_GLOW }, held: false, pickupCount: 0 } },
+      { gameObject: CHAIR, type: CHAIR_CLASS, fields: { menu: { $gameObject: CHAIR_MENU }, sitCount: 0 } },
+      {
+        gameObject: SCREEN, type: VIDEO_CLASS,
+        fields: {
+          videoPlayer: { $component: { path: SCREEN, type: "VRC.SDK3.Video.Components.VRCUnityVideoPlayer" } },
+          playingIndicator: { $gameObject: SCREEN_ON },
+          // A string becomes a VRCUrl: Udon cannot construct one at runtime, so the editor has to.
+          url: "https://example.com/agentic-e2e.mp4",
+          isPlaying: false,
+        },
+      },
+    ];
 
-    const set = await rpc("udon.set_fields", {
-      gameObject: BUTTON, type: CLASS,
-      fields: { step: 1, count: 0, display: { $gameObject: DISPLAY } },
-      saveScene: true,
-    }, { timeoutMs: 60_000 });
-    assert(set.copiedToUdon, `CopyProxyToUdon failed: ${set.copyError}`);
+    const summary = [];
+    for (const entry of wiring) {
+      const attached = await rpc("udon.attach", { gameObject: entry.gameObject, type: entry.type },
+        { timeoutMs: 60_000 });
+      assert(attached.programAssetLinked, `program asset not linked for ${entry.type}`);
 
-    // The assertion that matters: the values reached the UdonBehaviour, not just the proxy.
-    const read = await rpc("udon.read_vars", { gameObject: BUTTON, type: CLASS });
-    assert(read.mismatchCount === 0, `proxy and Udon disagree: ${JSON.stringify(read.variables)}`);
-    return `fields on Udon: ${read.variables.filter((v) => v.presentOnUdonBehaviour).map((v) => v.name).join(", ")}`;
+      const set = await rpc("udon.set_fields",
+        { gameObject: entry.gameObject, type: entry.type, fields: entry.fields, saveScene: true },
+        { timeoutMs: 60_000 });
+      assert(set.copiedToUdon, `CopyProxyToUdon failed for ${entry.type}: ${set.copyError}`);
+
+      // The assertion that matters: the values reached the UdonBehaviour, not just the proxy.
+      const read = await rpc("udon.read_vars", { gameObject: entry.gameObject, type: entry.type });
+      assert(read.mismatchCount === 0, `${entry.type}: proxy and Udon disagree: ${JSON.stringify(read.variables)}`);
+      summary.push(`${entry.type}(${read.variables.filter((v) => v.presentOnUdonBehaviour).length} fields)`);
+    }
+    return `on the UdonBehaviour: ${summary.join(", ")}`;
+  });
+
+  await step("the video URL survived as a real VRCUrl", async () => {
+    // A URL that failed to convert reads back empty and only fails in the world, where nobody is watching.
+    const read = await rpc("udon.read_vars", { gameObject: SCREEN, type: VIDEO_CLASS });
+    const url = read.variables.find((v) => v.name === "url");
+    const player = read.variables.find((v) => v.name === "videoPlayer");
+    // VRCUrl keeps its content private, so the bridge reports the type's own ToString.
+    assert(url && String(url.udonValue?.toString ?? "").includes("agentic-e2e.mp4"),
+      `url did not reach Udon as a VRCUrl: ${JSON.stringify(url)}`);
+    assert(player && player.presentOnUdonBehaviour, `video player reference missing: ${JSON.stringify(player)}`);
+    return "url and the BaseVRCVideoPlayer reference are both on the UdonBehaviour";
   });
 
   // ------------------------------------------------------------------ inspect
@@ -264,20 +553,64 @@ try {
 
   // ------------------------------------------------------------------ verify behaviour
 
-  await step("ClientSim proves the counter works", async () => {
+  await step("ClientSim proves every interaction works", async () => {
     const job = await runJob("verify.clientsim", {
-      name: "counter increments and reveals the display",
+      name: "button opens the door, the prop is carried, the chair seats the player, the video reacts",
       steps: [
         { wait_frames: 20 },
+
+        // The button: a synchronised counter whose observable effect is the door.
         { assert_var: { gameObject: BUTTON, type: CLASS, name: "count", equals: 0 } },
+        { assert_position: { gameObject: DOOR, near: DOOR_CLOSED, tolerance: 0.05 } },
         { assert_active: { gameObject: DISPLAY, equals: false } },
         { interact: { gameObject: BUTTON, type: CLASS } },
         { wait_frames: 3 },
         { assert_var: { gameObject: BUTTON, type: CLASS, name: "count", equals: 1 } },
+        { assert_position: { gameObject: DOOR, near: DOOR_OPEN, tolerance: 0.05 } },
         { assert_active: { gameObject: DISPLAY, equals: true } },
         { interact: { gameObject: BUTTON, type: CLASS } },
         { wait_frames: 3 },
         { assert_var: { gameObject: BUTTON, type: CLASS, name: "count", equals: 2 } },
+        { assert_position: { gameObject: DOOR, near: DOOR_CLOSED, tolerance: 0.05 } },
+
+        // The prop: taken by ClientSim's own hand, so OnPickup really fires.
+        { assert_held: { gameObject: PROP, equals: false } },
+        { grab: { gameObject: PROP, hand: "right" } },
+        { wait_frames: 3 },
+        { assert_held: { gameObject: PROP, equals: true } },
+        { assert_var: { gameObject: PROP, type: PROP_CLASS, name: "held", equals: true } },
+        { assert_var: { gameObject: PROP, type: PROP_CLASS, name: "pickupCount", equals: 1 } },
+        { assert_active: { gameObject: PROP_GLOW, equals: true } },
+        { drop: { gameObject: PROP } },
+        { wait_frames: 3 },
+        { assert_held: { gameObject: PROP, equals: false } },
+        { assert_var: { gameObject: PROP, type: PROP_CLASS, name: "held", equals: false } },
+        { assert_active: { gameObject: PROP_GLOW, equals: false } },
+
+        // The chair: entering a station is the other interaction that needs a real player.
+        { assert_in_station: { gameObject: CHAIR, equals: false } },
+        { sit: { gameObject: CHAIR } },
+        { wait_frames: 3 },
+        { assert_in_station: { gameObject: CHAIR, equals: true } },
+        { assert_var: { gameObject: CHAIR, type: CHAIR_CLASS, name: "sitCount", equals: 1 } },
+        { assert_active: { gameObject: CHAIR_MENU, equals: true } },
+        { stand: { gameObject: CHAIR } },
+        { wait_frames: 3 },
+        { assert_in_station: { gameObject: CHAIR, equals: false } },
+        { assert_active: { gameObject: CHAIR_MENU, equals: false } },
+
+        // The video player's callbacks, without streaming anything: the events are what a world reacts to,
+        // and playback would need the network and a URL Udon cannot build at runtime.
+        { assert_var: { gameObject: SCREEN, type: VIDEO_CLASS, name: "isPlaying", equals: false } },
+        { send_event: { gameObject: SCREEN, type: VIDEO_CLASS, event: "_onVideoStart" } },
+        { wait_frames: 3 },
+        { assert_var: { gameObject: SCREEN, type: VIDEO_CLASS, name: "isPlaying", equals: true } },
+        { assert_active: { gameObject: SCREEN_ON, equals: true } },
+        { send_event: { gameObject: SCREEN, type: VIDEO_CLASS, event: "_onVideoEnd" } },
+        { wait_frames: 3 },
+        { assert_var: { gameObject: SCREEN, type: VIDEO_CLASS, name: "isPlaying", equals: false } },
+        { assert_active: { gameObject: SCREEN_ON, equals: false } },
+
         { assert_no_errors: true },
       ],
     });
@@ -287,15 +620,24 @@ try {
     return `${job.result.stepCount} steps, 0 failures (${ignored} known SDK noise entr(y/ies) reported separately)`;
   });
 
-  await step("the telemetry contract produced parseable output", async () => {
+  await step("the telemetry contract produced parseable output for every feature", async () => {
     // The world logs [AGENTTEL] lines; in ClientSim they land in the Unity console rather than a client log,
     // which is the same contract verify_multiclient reads from a real client.
-    const console_ = await rpc("unity.console", { limit: 200, grep: "[AGENTTEL]" });
+    const console_ = await rpc("unity.console", { limit: 400, grep: "[AGENTTEL]" });
     assert(console_.returned > 0, "no telemetry lines were captured");
-    const last = console_.entries[console_.entries.length - 1];
-    const payload = JSON.parse(String(last.msg).slice(String(last.msg).indexOf("{")));
-    assert(typeof payload.counter === "number", `unparseable telemetry: ${last.msg}`);
-    return `${console_.returned} telemetry line(s), last counter=${payload.counter}`;
+
+    // Every feature reports under its own key, so a silent one is visible here rather than in a world.
+    const seen = {};
+    for (const entry of console_.entries) {
+      const text = String(entry.msg);
+      const payload = JSON.parse(text.slice(text.indexOf("{")));
+      for (const key of Object.keys(payload)) seen[key] = payload[key];
+    }
+    for (const feature of ["counter", "prop", "chair", "video"]) {
+      assert(feature in seen, `no telemetry from ${feature}; got ${Object.keys(seen).join(", ") || "nothing"}`);
+    }
+    return `${console_.returned} line(s): counter=${seen.counter}, prop pickups=${seen.prop.pickups}, ` +
+      `chair sits=${seen.chair.sits}, video playing=${seen.video.playing}`;
   });
 
   // ------------------------------------------------------------------ build
@@ -315,6 +657,33 @@ try {
     return `${report.bundle.megabytes.toFixed(2)}MB; ${report.bundle.limitNote ?? `${report.bundle.percentOfLimit.toFixed(1)}% of the limit`}`;
   });
 
+  await step("build the same world for Quest", async () => {
+    // Both platforms, because a world that only builds for PC is half a deliverable — and because switching
+    // target is the step most likely to surprise: it reloads the script domain, so anything in flight dies,
+    // and Unity reimports every asset for the new platform.
+    await rpc("world.switch_platform", { platform: "Android" }, { timeoutMs: 900_000 });
+    await waitForIdle(900_000);
+    const onAndroid = await rpc("world.build_status", {}, { timeoutMs: 120_000 });
+    assert(onAndroid.activeBuildTarget === "Android",
+      `still on ${onAndroid.activeBuildTarget} after switching`);
+
+    const job = await runJob("verify.build_local", {}, 1_800_000);
+    assert(job.result?.ok === true,
+      `Android build failed at ${job.result?.stage}: ${job.result?.message} ${JSON.stringify(job.result?.validationErrors ?? "")}`);
+    assert(job.result.bundleBytes > 0, "Android bundle is empty");
+
+    const report = await rpc("budget.report", { platform: "Android" }, { timeoutMs: 180_000 });
+    assert(report.bundle.withinLimit === true, `over the mobile limit: ${JSON.stringify(report.bundle)}`);
+    const mobile = `${job.result.bundleMegabytes.toFixed(2)}MB, ${report.bundle.percentOfLimit.toFixed(1)}% of the mobile limit`;
+
+    // Leave the project as it was found: an editor left on Android is a surprise for the next run.
+    await rpc("world.switch_platform", { platform: "Windows" }, { timeoutMs: 900_000 });
+    await waitForIdle(900_000);
+    const back = await rpc("world.build_status", {}, { timeoutMs: 120_000 });
+    assert(back.activeBuildTarget === "StandaloneWindows64", `did not switch back: ${back.activeBuildTarget}`);
+    return `${mobile}; switched back to ${back.activeBuildTarget}`;
+  });
+
   await step("checkpoint the finished world", async () => {
     const result = projectGit.checkpoint(PROJECT, "agentic e2e: world built and verified", false);
     return result.committed ? `committed ${result.fileCount} files at ${result.head}` : `nothing changed (${result.reason})`;
@@ -328,6 +697,8 @@ console.log(`\n${passed}/${passed + failed} steps passed in ${(total / 1000).toF
 if (failed === 0) {
   const slowest = [...timeline].sort((a, b) => b.ms - a.ms).slice(0, 3);
   console.log(`slowest: ${slowest.map((s) => `${s.name} ${(s.ms / 1000).toFixed(1)}s`).join(" | ")}`);
-  console.log("\nA small interactive VRChat world was scaffolded, scripted, verified and built with no human in the editor.");
+  console.log("\nA VRChat world with a button-operated door, a synchronised counter, a video player, a");
+  console.log("carryable prop and a station was scaffolded, scripted, verified and built with no human in");
+  console.log("the editor.");
 }
 process.exit(failed > 0 ? 1 : 0);

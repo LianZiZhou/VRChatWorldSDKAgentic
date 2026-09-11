@@ -7,6 +7,9 @@ using VRC.SDKBase;
 public class AgenticE2ECounter : UdonSharpBehaviour
 {
     public GameObject display;
+    public Transform door;
+    public Vector3 doorClosed;
+    public Vector3 doorOpen;
     public int step;
 
     [UdonSynced] public int count;
@@ -30,5 +33,7 @@ public class AgenticE2ECounter : UdonSharpBehaviour
         // only channel verify_multiclient can read back.
         Debug.Log("[AGENTTEL]{\"counter\":" + count + "}");
         if (display != null) display.SetActive(count > 0);
+        // Odd presses leave the door open, so the door's position is the observable effect of the count.
+        if (door != null) door.localPosition = (count % 2 == 1) ? doorOpen : doorClosed;
     }
 }

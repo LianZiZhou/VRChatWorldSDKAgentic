@@ -30,11 +30,11 @@ Unity 6, which VRChat does not support. See [docs/ARCHITECTURE.md](docs/ARCHITEC
 
 ## Status
 
-**Complete and verified against a live editor: 163 checks across 12 suites, in 80 seconds.**
+**Complete and verified against a live editor: 165 checks across 12 suites.**
 
 | Suite | Covers | Result |
 |---|---|---|
-| `tests/e2e-world.mjs` | **scaffold → script → verify → build a real world** | 18/18 in ~20s |
+| `tests/e2e-world.mjs` | **scaffold → script → verify → build the full world, PC and Quest** | 20/20 in ~48s |
 | `tests/m0-smoke.mjs` | bridge transport, eval, reflection, jobs | 21/21 |
 | `tests/m1-udon.mjs` | UdonSharp authoring loop | 15/15 |
 | `tests/m2-world.mjs` | project setup, scaffolding, validation, scene spec, audit, renders | 20/20 |
@@ -51,16 +51,25 @@ Unity 6, which VRChat does not support. See [docs/ARCHITECTURE.md](docs/ARCHITEC
 node tests/run-all.mjs
 ```
 
-The end-to-end run scaffolds a world, generates a room with a doorway, writes and compiles an UdonSharp
-counter, wires and verifies its fields reach the backing UdonBehaviour, audits the geometry, renders the
-scene, checks the budget for PC and Quest, proves the behaviour in a ClientSim play-mode session, parses its
-telemetry, and produces a real `.vrcw` — with no human in the editor.
+The end-to-end run builds the world the plan called for: **a button that opens a door, a counter
+synchronised across players, a video player, a prop you can pick up, and a chair you can sit in**. It
+scaffolds the scene, generates a room with a doorway, places every object and SDK component declaratively,
+lints four UdonSharp behaviours before Unity sees them, compiles them, wires and verifies their fields reach
+the backing UdonBehaviours, audits the geometry, renders the scene, checks the budget, proves every
+interaction in a ClientSim play-mode session — interact, grab, drop, sit, stand, and the video callbacks, 46
+scenario steps — parses the telemetry each feature emits, and produces a real `.vrcw` for **both PC and
+Quest**, with no human in the editor.
 
 One tool is **not** end-to-end verified: `verify_multiclient`, which launches real VRChat clients to test
 synchronisation, needs a VRChat client installed and an account signed in. Its preconditions, log parsing and
 preflight are tested (`verify_multiclient_preflight`); the launch-and-converge path has never been run here.
 It reports precisely which preconditions are missing rather than failing opaquely, but treat it as untested
 code until you have run it yourself.
+
+Two other honest limits. A job interrupted by an editor restart is journalled and reported as `interrupted`;
+it does not resume by itself, because a half-finished build or play-mode session has to start again anyway.
+And scenario steps do not check reachability — `grab` and `interact` reach the object wherever it is, so
+whether a player could actually get to it stays `scene_spatial_audit`'s question.
 
 ## Tools
 
@@ -80,7 +89,9 @@ agent run; its own ~47 tools arrive through the second MCP server)
 `world_validate`, `scene_apply_spec`, `scene_describe`, `scene_component_whitelist`, `scene_spatial_audit`,
 `scene_survey_shots`, `geo_generate`, `geo_kinds`
 
-**Verification and build** — `verify_scenario_schema`, `verify_clientsim`, `verify_build_local`,
+**Verification and build** — `verify_scenario_schema`, `verify_clientsim` (18 scenario step types: wait,
+interact, send_event, set_var, grab, drop, sit, stand, teleport, respawn, and assertions on variables, active
+state, position, held state, station occupancy and the console), `verify_build_local`,
 `verify_multiclient_preflight`, `verify_multiclient`, `verify_vrc_logs`, `verify_udon_exceptions`,
 `world_build_status`, `world_set_dry_run`, `world_switch_platform`
 
