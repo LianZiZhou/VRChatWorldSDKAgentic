@@ -228,20 +228,34 @@ namespace Agentic.Vrcw.Bridge
 
         private static void AuditFloating(List<Sample> samples, float threshold, List<object> findings)
         {
+            // The lowest geometry in a scene has nothing beneath it by definition, so a naive "nothing below"
+            // test flags every floor. That is the fastest way to make an audit worthless: once it cries wolf
+            // about the floor, its real findings get ignored too.
+            float groundLevel = float.MaxValue;
+            foreach (var sample in samples) groundLevel = Mathf.Min(groundLevel, sample.bounds.min.y);
+
             int flagged = 0;
             foreach (var sample in samples)
             {
                 if (flagged >= MaxSamplesPerFinding) break;
                 if (sample.bounds.size.magnitude < 0.1f) continue;
 
-                // Cast from just under the object's lowest point, ignoring the object itself by starting
-                // below it rather than by layer tricks.
-                var origin = new Vector3(sample.bounds.center.x, sample.bounds.min.y - 0.02f, sample.bounds.center.z);
-                RaycastHit hit;
-                bool supported = Physics.Raycast(origin, Vector3.down, out hit, threshold + 0.05f);
-                if (supported) continue;
+                // At or near the lowest point in the scene: this *is* the ground.
+                if (sample.bounds.min.y <= groundLevel + 0.5f) continue;
 
-                bool anythingBelow = Physics.Raycast(origin, Vector3.down, out hit, 200f);
+                // Floor- or ceiling-shaped: broad and thin. Supporting geometry, not a floating prop.
+                var size = sample.bounds.size;
+                if (size.y < 0.6f && size.x > 4f && size.z > 4f) continue;
+
+                RaycastHit hit;
+                if (IsSupported(sample.bounds, threshold, out hit)) continue;
+
+                // Nothing underneath is not the same as unsupported. A doorway lintel, a beam, a wall-mounted
+                // sign and a shelf are all held from the side, and flagging them would bury the one object
+                // that really is hanging in mid-air.
+                if (HasLateralContact(sample)) continue;
+
+                bool anythingBelow = ProbeDown(sample.bounds, 200f, out hit);
                 findings.Add(Finding("warning", "floating",
                     anythingBelow
                         ? "Nothing within " + threshold.ToString("0.00") + "m below this object; the nearest surface is " +
@@ -294,6 +308,77 @@ namespace Agentic.Vrcw.Bridge
         private static float Volume(Bounds b)
         {
             return Mathf.Max(0.0001f, b.size.x) * Mathf.Max(0.0001f, b.size.y) * Mathf.Max(0.0001f, b.size.z);
+        }
+
+        private static bool IsSupported(Bounds bounds, float threshold, out RaycastHit hit)
+        {
+            return ProbeDown(bounds, threshold + 0.05f, out hit);
+        }
+
+        /// <summary>
+        /// Whether anything else is touching this object from the side.
+        ///
+        /// Self-contact is excluded by walking up and down the transform hierarchy: the object's own collider
+        /// and its children's obviously touch it. Siblings do count — a lintel really is held by the wall
+        /// segments beside it.
+        /// </summary>
+        private static bool HasLateralContact(Sample sample)
+        {
+            const float Skin = 0.06f;
+            var touching = Physics.OverlapBox(sample.bounds.center, sample.bounds.extents + Vector3.one * Skin,
+                Quaternion.identity, ~0, QueryTriggerInteraction.Ignore);
+
+            var self = sample.renderer.transform;
+            for (int i = 0; i < touching.Length; i++)
+            {
+                var other = touching[i];
+                if (other == null) continue;
+                if (IsSameOrRelated(self, other.transform)) continue;
+                return true;
+            }
+            return false;
+        }
+
+        private static bool IsSameOrRelated(Transform self, Transform other)
+        {
+            if (other == self) return true;
+            if (other.IsChildOf(self)) return true;
+            if (self.IsChildOf(other)) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Casts down from several points across the object's underside.
+        ///
+        /// Two details are load-bearing. The origin sits *just inside* the object's own bottom face rather
+        /// than below it: Unity does not report a collider that a ray starts inside, so beginning the ray
+        /// below the object put it inside the floor it was standing on and the floor went undetected — which
+        /// made every wall in a generated room look like it was floating.
+        ///
+        /// And it samples the corners as well as the centre, because an object resting on a narrow beam or
+        /// overhanging a ledge is supported even though its centre has nothing beneath it.
+        /// </summary>
+        private static bool ProbeDown(Bounds bounds, float distance, out RaycastHit hit)
+        {
+            float y = bounds.min.y + 0.01f;
+            float insetX = Mathf.Max(0f, bounds.extents.x - 0.05f);
+            float insetZ = Mathf.Max(0f, bounds.extents.z - 0.05f);
+
+            var origins = new[]
+            {
+                new Vector3(bounds.center.x, y, bounds.center.z),
+                new Vector3(bounds.center.x - insetX, y, bounds.center.z - insetZ),
+                new Vector3(bounds.center.x + insetX, y, bounds.center.z - insetZ),
+                new Vector3(bounds.center.x - insetX, y, bounds.center.z + insetZ),
+                new Vector3(bounds.center.x + insetX, y, bounds.center.z + insetZ),
+            };
+
+            for (int i = 0; i < origins.Length; i++)
+            {
+                if (Physics.Raycast(origins[i], Vector3.down, out hit, distance)) return true;
+            }
+            hit = new RaycastHit();
+            return false;
         }
 
         private static void AuditMissingColliders(List<Sample> samples, List<object> findings)

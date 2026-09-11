@@ -87,6 +87,9 @@ try {
     "verify_scenario_schema", "verify_clientsim", "verify_build_local", "verify_multiclient_preflight",
     "verify_multiclient", "verify_vrc_logs", "verify_udon_exceptions",
     "world_build_status", "world_set_dry_run", "world_switch_platform",
+    "budget_report", "budget_snapshot", "budget_diff", "budget_import_audit", "budget_apply_import_presets",
+    "assets_inventory", "assets_unused", "assets_make_material", "assets_import_file", "assets_ledger",
+    "geo_generate", "geo_kinds",
   ];
   // Asserting against the expected list rather than a raw count, so adding tools never fails the test.
   report("tools/list returns at least the expected surface", tools.length >= expected.length, `${tools.length} tools`);

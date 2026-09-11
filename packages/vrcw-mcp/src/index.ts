@@ -788,6 +788,187 @@ tool(
   async (a) => rpc("verify.udon_exceptions", { sinceSeq: a.sinceSeq ?? 0 }, { project: a.project })
 );
 
+// ---------------------------------------------------------------- budget & assets
+
+tool(
+  "budget_report",
+  "Per-platform content budget: geometry, materials, textures, lights, audio, VRChat components, and the " +
+    "built bundle measured against VRChat's size limit.\n" +
+    "The limits are read from the SDK, not hardcoded. Note what that reveals: VRChat enforces a bundle size " +
+    "limit for mobile but *not* for PC, so on PC `compressedEnforced` is false and size is a performance " +
+    "judgement rather than a gate. Errors in the report are things VRChat actually blocks; warnings are " +
+    "recommendations, since worlds have no hard polygon or material limit.",
+  {
+    ...projectArg,
+    platform: z.enum(["current", "Windows", "Android"]).optional(),
+    maxObjects: z.number().int().min(1).max(200_000).optional(),
+  },
+  async (a) =>
+    rpc("budget.report", { platform: a.platform ?? "current", maxObjects: a.maxObjects ?? 20_000 },
+      { project: a.project, timeoutMs: 180_000 })
+);
+
+tool(
+  "budget_snapshot",
+  "Save a named budget report so a later change can be diffed against it.",
+  { ...projectArg, name: z.string(), platform: z.enum(["current", "Windows", "Android"]).optional() },
+  async (a) => rpc("budget.snapshot", { name: a.name, platform: a.platform ?? "current" }, { project: a.project, timeoutMs: 180_000 })
+);
+
+tool(
+  "budget_diff",
+  "Compare a saved snapshot against the scene now, reporting only the metrics that moved — so the cost of a " +
+    "change is immediately visible rather than buried in unchanged numbers.",
+  { ...projectArg, name: z.string(), platform: z.enum(["current", "Windows", "Android"]).optional() },
+  async (a) => rpc("budget.diff", { name: a.name, platform: a.platform ?? "current" }, { project: a.project, timeoutMs: 180_000 })
+);
+
+tool(
+  "budget_import_audit",
+  "Report which assets do not match a platform's recommended import settings, changing nothing.\n" +
+    "This is where a dual-platform world is won or lost. Android textures must be ASTC — the SDK reports an " +
+    "error and refuses the build otherwise — and long audio clips left on DecompressOnLoad will exhaust " +
+    "Quest's memory.",
+  {
+    ...projectArg,
+    platform: z.enum(["current", "Windows", "Android"]).optional(),
+    folder: z.string().optional(),
+    maxAssets: z.number().int().min(1).max(50_000).optional(),
+    maxTextureSize: z.number().int().min(32).max(8192).optional(),
+  },
+  async (a) =>
+    rpc("budget.import_audit",
+      { platform: a.platform ?? "current", folder: a.folder ?? "Assets", maxAssets: a.maxAssets ?? 2000, maxTextureSize: a.maxTextureSize },
+      { project: a.project, timeoutMs: 300_000 })
+);
+
+tool(
+  "budget_apply_import_presets",
+  "Apply a platform's import settings to the assets that need them. Reimports every asset it touches, so " +
+    "this runs as a job; audit first with budget_import_audit.",
+  {
+    ...projectArg,
+    platform: z.enum(["current", "Windows", "Android"]).optional(),
+    folder: z.string().optional(),
+    maxAssets: z.number().int().min(1).max(50_000).optional(),
+    maxTextureSize: z.number().int().min(32).max(8192).optional(),
+    waitMs: z.number().int().min(10_000).max(3_600_000).optional(),
+  },
+  async (a) =>
+    runJobAndWait("budget.apply_import_presets",
+      { platform: a.platform ?? "current", folder: a.folder ?? "Assets", maxAssets: a.maxAssets ?? 2000, maxTextureSize: a.maxTextureSize },
+      { project: a.project, waitMs: a.waitMs ?? 1_800_000 })
+);
+
+tool(
+  "assets_inventory",
+  "Assets by file type with sizes and totals — the quickest way to see what is actually consuming the project.",
+  { ...projectArg, folder: z.string().optional(), maxAssets: z.number().int().min(1).max(100_000).optional() },
+  async (a) => rpc("assets.inventory", { folder: a.folder ?? "Assets", maxAssets: a.maxAssets ?? 5000 }, { project: a.project, timeoutMs: 180_000 })
+);
+
+tool(
+  "assets_unused",
+  "Assets no scene can reach, with the size they would free. Reachability uses the same dependency walk the " +
+    "build does. Scripts and editor-only assets are excluded deliberately: they are reached through code, so " +
+    "this evidence cannot condemn them.",
+  {
+    ...projectArg,
+    folder: z.string().optional(),
+    scenes: z.array(z.string()).optional().describe("Scenes to treat as roots. Default: every scene in the project."),
+    maxAssets: z.number().int().min(1).max(100_000).optional(),
+  },
+  async (a) =>
+    rpc("assets.unused", { folder: a.folder ?? "Assets", scenes: a.scenes ?? [], maxAssets: a.maxAssets ?? 5000 },
+      { project: a.project, timeoutMs: 300_000 })
+);
+
+tool(
+  "assets_make_material",
+  "Create or update a material. Properties the shader does not have are reported as skipped rather than " +
+    "silently dropped.",
+  {
+    ...projectArg,
+    path: z.string().describe("Asset path under Assets/, e.g. Assets/Materials/Glass.mat"),
+    shader: z.string().optional().describe('Shader name. Default "Standard".'),
+    textures: z.record(z.string()).optional().describe("Shader property to texture asset path."),
+    colors: z.record(z.any()).optional().describe("Shader property to [r,g,b,a] or {r,g,b,a}."),
+    floats: z.record(z.number()).optional(),
+  },
+  async (a) =>
+    rpc("assets.make_material",
+      { path: a.path, shader: a.shader ?? "Standard", textures: a.textures, colors: a.colors, floats: a.floats },
+      { project: a.project, timeoutMs: 120_000 })
+);
+
+tool(
+  "assets_import_file",
+  "Copy an external file into the project and import it, recording where it came from.\n" +
+    "`source` and `licence` are required, not optional. An agent that imports assets without recording " +
+    "provenance produces a world nobody can later clear for distribution, and that cannot be reconstructed " +
+    "after the fact.",
+  {
+    ...projectArg,
+    sourcePath: z.string().describe("Absolute path of the file to bring in."),
+    source: z.string().describe("Where it came from, e.g. \"Poly Haven\"."),
+    licence: z.string().describe("Licence identifier, e.g. \"CC0-1.0\"."),
+    sourceUrl: z.string().optional(),
+    destFolder: z.string().optional().describe("Default Assets/Imported."),
+    name: z.string().optional(),
+  },
+  async (a) =>
+    rpc("assets.import_file",
+      { sourcePath: a.sourcePath, source: a.source, licence: a.licence, sourceUrl: a.sourceUrl, destFolder: a.destFolder, name: a.name },
+      { project: a.project, timeoutMs: 180_000 })
+);
+
+tool(
+  "assets_ledger",
+  "Read the asset provenance ledger, optionally regenerating ATTRIBUTION.md from it. Also reports ledger " +
+    "entries whose asset has since been deleted, so the attribution file stays truthful.",
+  { ...projectArg, writeAttribution: z.boolean().optional(), attributionPath: z.string().optional() },
+  async (a) =>
+    rpc("assets.ledger", { writeAttribution: a.writeAttribution ?? false, attributionPath: a.attributionPath },
+      { project: a.project, timeoutMs: 120_000 })
+);
+
+tool(
+  "geo_kinds",
+  "The architecture geo_generate can build, with parameters and examples.",
+  { ...projectArg },
+  async (a) => rpc("geo.kinds", {}, { project: a.project })
+);
+
+tool(
+  "geo_generate",
+  "Generate architecture from parameters: a room (walls, floor, ceiling, doorways), a corridor between two " +
+    "points, or stairs. Idempotent — regenerating replaces the previous children rather than stacking.\n" +
+    "What this saves is the arithmetic, not the primitives. A wall with a doorway is three boxes whose sizes " +
+    "and offsets all depend on each other, and getting one wrong leaves a gap a player walks through. " +
+    "`size` is the room's interior; the floor is extended to pass under the walls.",
+  {
+    ...projectArg,
+    kind: z.enum(["room", "corridor", "stairs"]),
+    path: z.string().describe("Hierarchy path for the generated parent."),
+    size: z.array(z.number()).optional().describe("room: interior [x,y,z]."),
+    thickness: z.number().optional(),
+    floor: z.boolean().optional(),
+    ceiling: z.boolean().optional(),
+    walls: z.array(z.enum(["north", "south", "east", "west"])).optional(),
+    doors: z.array(z.record(z.any())).optional().describe("room: [{wall,width,height,offset}]."),
+    from: z.array(z.number()).optional().describe("corridor start."),
+    to: z.array(z.number()).optional().describe("corridor end."),
+    width: z.number().optional(),
+    height: z.number().optional(),
+    steps: z.number().int().min(1).max(400).optional(),
+    stepHeight: z.number().optional(),
+    stepDepth: z.number().optional(),
+    material: z.string().optional().describe("Material asset path applied to every piece."),
+    saveScene: z.boolean().optional(),
+  },
+  async (a) => rpc("geo.generate", { ...a, project: undefined }, { project: a.project, timeoutMs: 180_000 })
+);
+
 // ---------------------------------------------------------------- boot
 
 async function main(): Promise<void> {

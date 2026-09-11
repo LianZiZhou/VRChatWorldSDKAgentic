@@ -29,6 +29,10 @@ namespace Agentic.Vrcw.Bridge
             BuildOps.Register();
             VrcLogReader.Register();
             MultiClient.Register();
+            BudgetReport.Register();
+            ImportPresets.Register();
+            AssetOps.Register();
+            GeoGenerate.Register();
         }
 
         // ---------- introspection ----------
