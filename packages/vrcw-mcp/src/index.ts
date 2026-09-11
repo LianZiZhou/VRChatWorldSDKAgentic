@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { listInstances } from "./registry.js";
 import { ping, rpc, BridgeError } from "./bridge.js";
 import * as projectGit from "./project.js";
+import * as openAssets from "./openassets.js";
 
 const MAX_TEXT = 120_000;
 
@@ -1072,6 +1073,51 @@ tool(
       .describe("Files or directories to analyse. Absolute paths, or paths relative to the working directory."),
   },
   async (a) => runAnalyzer(a.paths)
+);
+
+// ---------------------------------------------------------------- open-licence assets
+
+tool(
+  "open_assets_sources",
+  "Which asset sources this tool may contact, and the licence each one publishes under.\n" +
+    "Hosts outside the list are refused. Asset marketplaces (Booth, the Unity Asset Store, Gumroad) are " +
+    "deliberately unreachable: their per-asset licences cannot be evaluated or paid for by an automated run.",
+  {},
+  async () => openAssets.listSources()
+);
+
+tool(
+  "open_assets_search",
+  "Search Poly Haven's CC0 catalogue for HDRIs, textures or models. Read-only public API, no credentials.",
+  {
+    query: z.string().describe("Substring matched against id, tags and categories."),
+    kind: z.enum(["hdris", "textures", "models"]).optional().describe("Default textures."),
+    limit: z.number().int().min(1).max(100).optional(),
+  },
+  async (a) => openAssets.searchPolyHaven(a.query, a.kind ?? "textures", a.limit ?? 20)
+);
+
+tool(
+  "open_assets_files",
+  "List the downloadable files for one Poly Haven asset, smallest first. A 1K texture is usually right for a " +
+    "world, and is required for Quest.",
+  { id: z.string().describe("Poly Haven asset id from open_assets_search.") },
+  async (a) => openAssets.polyHavenFiles(a.id)
+);
+
+tool(
+  "open_assets_fetch",
+  "Download one file from an allowlisted open-licence source into a staging directory, with a checksum.\n" +
+    "Nothing enters the Unity project here — the response tells you the assets_import_file call that does, " +
+    "carrying the source and licence forward. A non-allowlisted host requires you to state the licence " +
+    "explicitly, so the claim is attributable rather than inferred. https only.",
+  {
+    url: z.string().describe("Direct https URL of the file."),
+    licence: z.string().optional().describe("Required for hosts that are not single-licence catalogues."),
+    stagingDir: z.string().optional(),
+    maxBytes: z.number().int().min(1024).max(536_870_912).optional().describe("Default 64MB."),
+  },
+  async (a) => openAssets.fetchOpenAsset(a.url, a.licence, a.stagingDir, a.maxBytes ?? 67_108_864)
 );
 
 // ---------------------------------------------------------------- checkpointing

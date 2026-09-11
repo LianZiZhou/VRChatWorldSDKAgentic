@@ -92,6 +92,7 @@ try {
     "geo_generate", "geo_kinds", "udon_lint",
     "udon_whitelist_query", "udon_syncable", "udon_export_whitelist",
     "project_status", "project_checkpoint", "project_checkpoints", "project_rollback",
+    "open_assets_sources", "open_assets_search", "open_assets_files", "open_assets_fetch",
   ];
   // Asserting against the expected list rather than a raw count, so adding tools never fails the test.
   report("tools/list returns at least the expected surface", tools.length >= expected.length, `${tools.length} tools`);

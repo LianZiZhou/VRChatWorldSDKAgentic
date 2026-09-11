@@ -284,3 +284,18 @@ be garbage collected is not a safety net.
 
 `.gitignore` handling recognises Unity's official template (`/[Ll]ibrary/`) rather than comparing literally,
 which would have reported every correctly-configured project as broken and then appended duplicate rules.
+
+## 16. Asset sourcing is a licensing problem first
+
+`open_assets_*` is built around refusal rather than reach. Only hosts on an allowlist are contactable, and each
+is there because its operator publishes the whole relevant catalogue under one licence — which is what makes an
+automated licence claim defensible. A source with per-asset licensing does not qualify.
+
+Marketplaces (Booth, the Unity Asset Store, Gumroad) are deliberately unreachable: their licences must be
+evaluated and paid for per asset, which an unattended run cannot do. The refusal says so rather than failing
+vaguely.
+
+Download and import are separate steps. `open_assets_fetch` puts a file in a staging directory with a SHA-256;
+`assets_import_file` brings it into the project and *requires* `source` and `licence`. Nothing reaches a project
+without provenance, because an agent that skips this produces a world nobody can later clear for distribution —
+and that cannot be reconstructed after the fact. `ATTRIBUTION.md` is generated from the ledger, never hand-written.

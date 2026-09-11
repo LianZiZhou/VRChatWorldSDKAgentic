@@ -6,7 +6,7 @@ SDK 3.10.5** — organising assets, writing Udon, assembling scenes, verifying b
 | Package | What it is |
 |---|---|
 | `packages/unity-bridge` | UPM package `com.agentic.vrcw` — an always-on HTTP bridge inside the Unity Editor |
-| `packages/vrcw-mcp` | Node/TS MCP server: 61 tools fronting the bridge |
+| `packages/vrcw-mcp` | Node/TS MCP server: 65 tools fronting the bridge |
 | `packages/supervisor` | Owns the editor process: picks the right install, relaunches on death, names and answers blocking dialogs |
 | `packages/udon-analyzer` | Roslyn linter for UdonSharp — runs outside Unity, ~150ms |
 
@@ -16,7 +16,7 @@ Unity 6, which VRChat does not support. See [docs/ARCHITECTURE.md](docs/ARCHITEC
 
 ## Status
 
-**Complete and verified against a live editor: 141 checks across 10 suites.**
+**Complete and verified against a live editor: 149 checks across 11 suites.**
 
 | Suite | Covers | Result |
 |---|---|---|
@@ -29,6 +29,7 @@ Unity 6, which VRChat does not support. See [docs/ARCHITECTURE.md](docs/ARCHITEC
 | `tests/m5-lint-whitelist.mjs` | out-of-Unity linter, Udon exposure whitelist | 11/11 |
 | `tests/m5-checkpoint.mjs` | checkpoint / rollback safety | 10/10 |
 | `tests/mcp-handshake.mjs` | MCP stdio protocol and tool surface | 6/6 |
+| `tests/m4-open-assets.mjs` | open-licence fetching, against the live Poly Haven API | 8/8 |
 | `tests/dialog-recovery.mjs` | raises a real modal dialog and recovers from it | 7/7 |
 
 The end-to-end run scaffolds a world, generates a room with a doorway, writes and compiles an UdonSharp
@@ -57,7 +58,8 @@ telemetry, and produces a real `.vrcw` — with no human in the editor.
 
 **Budget and assets** — `budget_report`, `budget_snapshot`, `budget_diff`, `budget_import_audit`,
 `budget_apply_import_presets`, `assets_inventory`, `assets_unused`, `assets_make_material`,
-`assets_import_file`, `assets_ledger`
+`assets_import_file`, `assets_ledger`, `open_assets_sources`, `open_assets_search`,
+`open_assets_files`, `open_assets_fetch`
 
 **Safety** — `project_status`, `project_checkpoint`, `project_checkpoints`, `project_rollback`
 
