@@ -112,10 +112,18 @@ namespace Agentic.Vrcw.Bridge
                         _listener = listener;
                         _port = candidate;
                     }
-                    catch (HttpListenerException)
+                    catch (Exception bindFailure)
                     {
-                        // Either we lost the race for that port, or the previous domain's listener has
-                        // not released it yet. Either way, try another.
+                        // Either we lost the race for that port, or a listener from the previous domain
+                        // is still holding it. Either way, try another.
+                        //
+                        // Catching Exception rather than HttpListenerException is deliberate and was paid
+                        // for: Unity's Mono implements HttpListener over a managed socket, so a taken port
+                        // surfaces as a bare SocketException ("Only one usage of each socket address is
+                        // normally permitted"). That escaped a narrower catch, aborted Start() before the
+                        // fallback, and — because the retry watchdog kept preferring the same remembered
+                        // port — left the editor permanently unreachable while still perfectly alive.
+                        if (!(bindFailure is HttpListenerException) && !(bindFailure is SocketException)) throw;
                         try { listener.Close(); } catch (Exception) { }
                     }
                 }
@@ -305,8 +313,22 @@ namespace Agentic.Vrcw.Bridge
             ctx.Response.StatusCode = status;
             ctx.Response.ContentType = "application/json; charset=utf-8";
             ctx.Response.ContentLength64 = bytes.Length;
-            ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
-            ctx.Response.OutputStream.Close();
+
+            // No keep-alive, and close the response rather than just its stream.
+            //
+            // Mono's HttpListener holds a kept-alive connection until its own idle timeout, and closing
+            // only the output stream leaves that bookkeeping in place: a long-lived poller (the
+            // supervisor, an MCP session) left one socket per request in CLOSE_WAIT, dozens of them
+            // within an hour. Connection reuse buys a localhost control channel nothing.
+            ctx.Response.KeepAlive = false;
+            try
+            {
+                ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+            }
+            finally
+            {
+                try { ctx.Response.Close(); } catch (Exception) { }
+            }
         }
 
         private static void WriteRegistry()
