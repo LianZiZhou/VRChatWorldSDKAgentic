@@ -31,12 +31,32 @@ namespace Agentic.Vrcw.Bridge
         static LogCapture()
         {
             LoadSeq();
-            Application.logMessageReceivedThreaded -= OnLog;
-            Application.logMessageReceivedThreaded += OnLog;
+            Subscribe();
+
             EditorApplication.update -= Flush;
             EditorApplication.update += Flush;
             AssemblyReloadEvents.beforeAssemblyReload -= Flush;
             AssemblyReloadEvents.beforeAssemblyReload += Flush;
+
+            // Re-subscribe around play mode. Unity clears Application.logMessageReceivedThreaded handlers
+            // when play mode ends, and with domain reload disabled — which ClientSim verification requires —
+            // this static constructor never runs again to restore them. Without this, console capture dies
+            // silently after the first play-mode session and stays dead, which is the worst kind of
+            // observability failure: the logs simply stop and nothing says so.
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+        }
+
+        private static void Subscribe()
+        {
+            Application.logMessageReceivedThreaded -= OnLog;
+            Application.logMessageReceivedThreaded += OnLog;
+        }
+
+        private static void OnPlayModeStateChanged(PlayModeStateChange change)
+        {
+            Flush();
+            Subscribe();
         }
 
         /// <summary>Highest sequence number issued so far. Callers snapshot this, do work, then ask for

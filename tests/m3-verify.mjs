@@ -191,6 +191,18 @@ await check("unknown step is rejected with the schema pointer", async () => {
   return message.slice(0, 140);
 });
 
+// Regression guard. Unity clears Application.logMessageReceivedThreaded handlers when play mode ends, and
+// with domain reload disabled (which ClientSim requires) the static constructor never re-runs to restore
+// them — so console capture used to die silently after the first scenario and stay dead.
+await check("console capture survives a play-mode cycle", async () => {
+  const probe = `[m3-capture-probe] ${Date.now()}`;
+  const r = await rpc("unity.eval_csharp", { code: `Debug.Log("${probe}"); return 1;` }, { timeoutMs: 120_000 });
+  assert(r.compiled && !r.threw, "probe eval failed");
+  const captured = (r.logs?.entries ?? []).some((e) => String(e.msg).includes(probe));
+  assert(captured, "Debug.Log was not captured after a play-mode session; the log subscription was lost");
+  return "log subscription intact after play mode";
+});
+
 await check("editor left out of play mode and ClientSim settings restored", async () => {
   const state = await rpc("unity.editor_state");
   assert(state.isPlaying === false, "editor is still in play mode");

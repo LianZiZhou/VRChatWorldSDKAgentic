@@ -89,7 +89,9 @@ try {
     "world_build_status", "world_set_dry_run", "world_switch_platform",
     "budget_report", "budget_snapshot", "budget_diff", "budget_import_audit", "budget_apply_import_presets",
     "assets_inventory", "assets_unused", "assets_make_material", "assets_import_file", "assets_ledger",
-    "geo_generate", "geo_kinds",
+    "geo_generate", "geo_kinds", "udon_lint",
+    "udon_whitelist_query", "udon_syncable", "udon_export_whitelist",
+    "project_status", "project_checkpoint", "project_checkpoints", "project_rollback",
   ];
   // Asserting against the expected list rather than a raw count, so adding tools never fails the test.
   report("tools/list returns at least the expected surface", tools.length >= expected.length, `${tools.length} tools`);

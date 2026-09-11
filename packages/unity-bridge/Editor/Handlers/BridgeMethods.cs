@@ -33,6 +33,7 @@ namespace Agentic.Vrcw.Bridge
             ImportPresets.Register();
             AssetOps.Register();
             GeoGenerate.Register();
+            UdonWhitelist.Register();
         }
 
         // ---------- introspection ----------

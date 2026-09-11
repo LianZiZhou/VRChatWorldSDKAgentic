@@ -177,3 +177,110 @@ Three traps that dictate the shape of the M1 tools:
 Also note `UdonSharpEditorUtility.ConvertToUdonBehaviours` is a dead stub that throws
 `NotImplementedException`, and the `AddComponent` its obsolete message points at does not exist. The real
 entry points are `UdonSharpUndo.AddComponent(go, type)` and `go.AddUdonSharpComponent(type)`.
+
+## 10. Modal dialogs: the real blocker for unattended runs
+
+This is the failure that actually stopped runs twice during development, and it is worth its own section.
+
+A modal dialog halts Unity's update loop. That halts the bridge's main-thread pump, so every `/rpc` returns
+`EDITOR_BUSY` and the run stops with nobody to click the button. Observed verbatim:
+
+- **"The open scene(s) have been modified externally"** — raised by re-importing a scene that Unity itself just
+  saved, and by rewriting scene files under a running editor (which is what a rollback does).
+- **"Detected external changes"** — exists only when Asset Pipeline *Auto Refresh* is off.
+
+Defended at four levels, because prevention alone cannot cover every dialog Unity might raise:
+
+1. **Prevented at the cause.** `world.scaffold` no longer calls `AssetDatabase.ImportAsset` on the scene it
+   just saved — `SaveScene` already registers it, and re-importing is what convinced Unity the open scene had
+   changed behind its back. `bridge.harden_editor` sets `kAutoRefresh=1`, `DirectoryMonitoring=1` and
+   `VerifySavingAssets=false`.
+2. **Survivable.** Requests are handled on the thread pool. Handling them inline on the accept thread meant one
+   `/rpc` waiting on a blocked main thread occupied that thread for its whole timeout, so `/ping` could not be
+   accepted either — and a *blocked* editor looked *dead*, the exact opposite of what `/ping` exists for.
+3. **Diagnosable.** The supervisor enumerates the editor's owned top-level windows (`list-windows.ps1`) and
+   names the dialog. `Get-Process` only exposes `MainWindowTitle`, which is precisely the window that is not
+   the dialog.
+4. **Recoverable.** `--auto-dismiss-dialogs true` answers allowlisted dialogs by pressing their default button.
+   The allowlist covers the benign external-change and save prompts and deliberately **holds** destructive ones
+   such as "Delete selected asset?" — pressing the default button of an unrecognised dialog is a way to agree
+   to something nobody asked for.
+
+`tests/dialog-recovery.mjs` raises a real modal on purpose and asserts the whole chain.
+
+## 11. Play mode, domain reload, and what it costs
+
+`verify.clientsim` runs as a job stepped by `EditorApplication.update`, which only survives entering play mode
+because `EnterPlayModeOptions.DisableDomainReload` is set. ClientSim's own test guidance requires the same
+option. Two consequences follow, both of which had to be handled rather than wished away:
+
+**SDK statics keep objects from the previous session.** Every repeated play-mode session logs a
+`MissingReferenceException` from `Texture2DDefaultTextureHolder.ResetTextures`, and another from UdonSharp's
+deferred `RunBehaviourSetup` `delayCall`. Neither is the world's bug. `assert_no_errors` reports them under
+`ignored` with an explanation instead of failing — an assertion that fails on every run teaches a reader to
+ignore it, which is worse than not having it.
+
+**Log subscriptions are cleared on play-mode exit.** Unity clears
+`Application.logMessageReceivedThreaded` handlers when play mode ends, and with domain reload disabled the
+`[InitializeOnLoad]` constructor never runs again to restore them. Console capture therefore died silently
+after the first ClientSim scenario and stayed dead. `LogCapture` now re-subscribes on
+`playModeStateChanged`, and `tests/m3-verify.mjs` guards it.
+
+## 12. Environmental failures that look like content failures
+
+Two cases where the SDK reports a content problem for an environment cause. Both now have up-front fixes,
+because an agent cannot debug what the error message actively misdirects it about.
+
+**"Scene export failed. Check console output for details."** `VRCWorldAssetExporter` stages the bundle under
+`%TEMP%\<companyName>\<productName>` and begins by `File.Delete`-ing a stale file there. When temp cleanup has
+removed that folder the delete throws `DirectoryNotFoundException` and the build dies — with nothing in the
+project to explain it. The same scene built fine minutes earlier. `verify.build_local` recreates the folder
+before every build.
+
+**Three identically-named types.** The UdonSharp compiler Roslyn-compiles user scripts into in-memory
+`UdonSharpRoslynCompileAssembly{N}` assemblies, each carrying a *shadow copy* of every `UdonSharpBehaviour`. A
+domain-wide `GetType` finds the same class three times with three different module ids, and attaching a shadow
+produces a component `GetComponent` can never find again. Type resolution goes through the program asset's
+`GetClass()`, which is authoritative.
+
+## 13. Size limits are the SDK's to state
+
+`budget.report` calls `VRC.ValidationHelpers.GetAssetBundleSizeLimit` rather than hardcoding numbers, and the
+answer corrects a common belief: the SDK returns a real limit for **mobile** and `-1` for **PC**. The widely
+quoted 100MB world limit is the mobile one; on PC, bundle size is a performance judgement rather than a gate.
+A hardcoded 100MB would have reported every large PC world as over limit.
+
+The same principle applies to the Udon exposure whitelist and the syncable-type list: both are read from the
+installed SDK (`UdonEditorManager.GetNodeDefinitions`, `UdonNetworkTypes.CanSync`) rather than transcribed.
+`tests/m5-lint-whitelist.mjs` cross-checks the linter's own hardcoded sync table against the SDK, so the two
+cannot quietly disagree.
+
+## 14. Geometry checks have to earn their keep
+
+`scene.spatial_audit` exists because an agent placing objects by coordinate has no feel for whether a player
+can stand on the floor. Three false-positive classes had to be eliminated before it was worth reading:
+
+- **Floors.** The lowest geometry in a scene has nothing beneath it by definition. Ground-level and
+  broad-and-thin geometry is exempt.
+- **Probe rays starting inside the support.** Casting from just *below* an object put the origin inside the
+  floor, and Unity does not report a collider a ray starts inside — so every wall in a generated room looked
+  unsupported. The probe now starts just inside the object's own underside and samples the corners too, so an
+  object resting on a narrow beam is not flagged.
+- **Things held from the side.** A doorway lintel, a beam, a wall sign. The check now tests lateral contact
+  before flagging.
+
+`tests/m2-world.mjs` still asserts a genuinely floating object *is* flagged, so narrowing the false positives
+did not amount to disabling the check.
+
+## 15. Checkpointing
+
+A Unity scene is a huge generated YAML document: it cannot be merged, cannot be reliably hand-reverted, and
+Unity's undo stack does not survive a domain reload. A commit before each risky step is the only workable undo.
+
+`project_rollback` is destructive to the working tree but not to work. It commits the current state first, and
+then anchors the pre-rollback head under `refs/agentic/safety/<timestamp>`. The ref matters: `reset --hard`
+leaves those commits unreachable from any ref, where `git gc` is entitled to prune them — a safety net that can
+be garbage collected is not a safety net.
+
+`.gitignore` handling recognises Unity's official template (`/[Ll]ibrary/`) rather than comparing literally,
+which would have reported every correctly-configured project as broken and then appended duplicate rules.

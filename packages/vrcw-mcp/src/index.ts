@@ -2,8 +2,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { listInstances } from "./registry.js";
 import { ping, rpc, BridgeError } from "./bridge.js";
+import * as projectGit from "./project.js";
 
 const MAX_TEXT = 120_000;
 
@@ -967,6 +972,154 @@ tool(
     saveScene: z.boolean().optional(),
   },
   async (a) => rpc("geo.generate", { ...a, project: undefined }, { project: a.project, timeoutMs: 180_000 })
+);
+
+// ---------------------------------------------------------------- udon lint (no Unity involved)
+
+/**
+ * Runs the standalone Roslyn linter.
+ *
+ * Deliberately out-of-process and Unity-free: getting a diagnostic from the real UdonSharp compiler costs a
+ * file write, an asset refresh, a C# compile and a domain reload. Most UdonSharp violations are visible in
+ * the syntax tree, so this turns that loop from tens of seconds into milliseconds.
+ */
+function runAnalyzer(paths: string[]): Promise<unknown> {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const root = join(here, "..", "..", "udon-analyzer");
+  const exe = join(root, "bin", "Release", "net8.0", process.platform === "win32" ? "udon-analyzer.exe" : "udon-analyzer");
+
+  if (!existsSync(exe)) {
+    return Promise.reject(
+      new Error(
+        `The Udon analyzer is not built. Run:\n  dotnet build -c Release "${join(root, "UdonAnalyzer.csproj")}"\n` +
+          `Expected the binary at ${exe}`
+      )
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(exe, ["--json", ...paths], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c.toString("utf8")));
+    child.stderr.on("data", (c) => (stderr += c.toString("utf8")));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      // Exit code 1 means findings, which is a successful run with a useful answer; 2 means bad invocation.
+      if (code === 2 || (!stdout.trim() && code !== 0)) {
+        reject(new Error(`analyzer exited ${code}: ${stderr || "no output"}`));
+        return;
+      }
+      try {
+        resolve({ ...JSON.parse(stdout), exitCode: code, stderr: stderr || undefined });
+      } catch (err) {
+        reject(new Error(`could not parse analyzer output: ${(err as Error).message}\n${stdout.slice(0, 500)}`));
+      }
+    });
+  });
+}
+
+tool(
+  "udon_whitelist_query",
+  "Ask whether a type, member or event exists in Udon at all, using the SDK's own node registry.\n" +
+    "Use this instead of guessing. Udon exposes a hand-curated subset of Unity, so an API being absent is a " +
+    "real answer rather than a spelling problem — and guessing costs a full write/compile/reload cycle per " +
+    "attempt. Names come back in Udon's mangled form: Type.__method__ParamTypes__ReturnType.",
+  {
+    ...projectArg,
+    query: z.string().describe('Substring to search for, e.g. "Networking.__SetOwner" or "Instantiate".'),
+    kind: z.enum(["any", "event"]).optional().describe('"event" searches only Udon events.'),
+    limit: z.number().int().min(1).max(500).optional(),
+  },
+  async (a) =>
+    rpc("udon.whitelist_query", { query: a.query, kind: a.kind ?? "any", limit: a.limit ?? 40 },
+      { project: a.project, timeoutMs: 120_000 })
+);
+
+tool(
+  "udon_syncable",
+  "Whether a type can be [UdonSynced], and whether it supports linear or smooth interpolation. Answered by " +
+    "calling VRC.Udon.UdonNetworkTypes, so it is authoritative rather than remembered. Note that syncable " +
+    "arrays additionally require the behaviour to use Manual sync.",
+  { ...projectArg, type: z.string().describe('Full type name, e.g. "UnityEngine.Vector3".') },
+  async (a) => rpc("udon.syncable", { type: a.type }, { project: a.project })
+);
+
+tool(
+  "udon_export_whitelist",
+  "Dump Udon's whole node registry and event list to a JSON file, generated from the installed SDK. Useful " +
+    "as an offline reference that cannot drift out of date the way hand-written documentation does.",
+  {
+    ...projectArg,
+    outputPath: z.string().optional().describe("Default <project>/.agentic/udon-whitelist.json."),
+    waitMs: z.number().int().min(10_000).max(1_800_000).optional(),
+  },
+  async (a) => runJobAndWait("udon.export_whitelist", { outputPath: a.outputPath }, { project: a.project, waitMs: a.waitMs ?? 600_000 })
+);
+
+tool(
+  "udon_lint",
+  "Check UdonSharp sources for constructs UdonSharp rejects — without starting Unity, in milliseconds.\n" +
+    "Run this before udon_compile on every edit. Getting the same answer from the real compiler costs a file " +
+    "write, an asset refresh, a C# compile and a domain reload, and most violations (try/catch, LINQ, " +
+    "lambdas, List<T>, static fields, multidimensional arrays, unsyncable [UdonSynced] types, arrays synced " +
+    "without Manual mode) are visible in the syntax alone.\n" +
+    "It is not a substitute: it has no symbol resolution, so it cannot tell whether a particular API is " +
+    "exposed to Udon. udon_compile remains the authority.",
+  {
+    paths: z
+      .array(z.string())
+      .describe("Files or directories to analyse. Absolute paths, or paths relative to the working directory."),
+  },
+  async (a) => runAnalyzer(a.paths)
+);
+
+// ---------------------------------------------------------------- checkpointing
+
+tool(
+  "project_status",
+  "Version-control state of the Unity project: whether it is tracked, what is dirty, whether git-lfs is " +
+    "available, and whether .gitignore excludes Unity's generated caches.",
+  { projectPath: z.string().describe("Unity project root.") },
+  async (a) => projectGit.status(a.projectPath)
+);
+
+tool(
+  "project_checkpoint",
+  "Commit the project's current state so a later change can be undone.\n" +
+    "Do this before any risky step. Unity scenes are huge generated YAML files: an agent cannot merge one, " +
+    "cannot reliably hand-undo a bad scene edit, and Unity's own undo stack does not survive a domain reload, " +
+    "so a commit is the only workable safety net. Also ensures .gitignore excludes Library/ and friends, " +
+    "which would otherwise add gigabytes of generated cache.",
+  {
+    projectPath: z.string(),
+    message: z.string().describe("What this checkpoint represents."),
+    init: z.boolean().optional().describe("Initialise a repository if the project is not tracked yet."),
+  },
+  async (a) => projectGit.checkpoint(a.projectPath, a.message, a.init ?? false)
+);
+
+tool(
+  "project_checkpoints",
+  "Recent checkpoints, newest first, with the short sha to roll back to.",
+  { projectPath: z.string(), limit: z.number().int().min(1).max(200).optional() },
+  async (a) => projectGit.checkpoints(a.projectPath, a.limit ?? 20)
+);
+
+tool(
+  "project_rollback",
+  "Hard-reset the project to a checkpoint. Requires confirm:true.\n" +
+    "Destructive to the working tree, but not to your work: the current state is committed as a safety " +
+    "checkpoint first, so a rollback made in error can itself be rolled back, and the response says how.\n" +
+    "Afterwards the editor still holds the old scene in memory, and rewriting scene files under a running " +
+    "editor raises Unity's \"modified externally\" dialog — run the supervisor with --auto-dismiss-dialogs " +
+    "true during rollbacks.",
+  {
+    projectPath: z.string(),
+    target: z.string().describe("Checkpoint sha, or any git revision such as HEAD~1."),
+    confirm: z.boolean().describe("Must be true. Guards against discarding the working tree by accident."),
+  },
+  async (a) => projectGit.rollback(a.projectPath, a.target, a.confirm === true)
 );
 
 // ---------------------------------------------------------------- boot
