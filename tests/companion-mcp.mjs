@@ -17,6 +17,7 @@
  * than failing, because neither absence is a defect in this code.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { connect } from "node:net";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,10 +102,11 @@ await check("both servers are wired into .mcp.json, with telemetry opted out", a
   const env = companion.env ?? {};
   assert(env.DISABLE_TELEMETRY === "1", "DISABLE_TELEMETRY is not set on the companion entry");
   assert(env.UNITY_MCP_DISABLE_TELEMETRY === "1", "UNITY_MCP_DISABLE_TELEMETRY is not set");
-  assert(
-    String(companion.args?.join(" ") ?? "").includes("third_party/unity-mcp/Server"),
-    "the companion entry does not point at the vendored server"
-  );
+  const args = String(companion.args?.join(" ") ?? "");
+  assert(args.includes("third_party/unity-mcp/Server"), "the companion entry does not point at the vendored server");
+  // Without --no-sync, launching this server fights the one the Unity package started from the same venv:
+  // uv tries to replace an executable that is open, and on Windows that fails and the server never answers.
+  assert(args.includes("--no-sync"), "the companion entry syncs the shared venv on every launch");
   return `vrcw + unity-generic (${Object.keys(env).length} opt-out variables)`;
 });
 
@@ -137,6 +139,29 @@ await check("its bridge is enabled and serving, without anyone having turned it 
   return `port ${companionStatus.bridge.unity_port}, reason "${companionStatus.bridge.reason}", project ${companionStatus.bridge.project_name}`;
 });
 
+await check("its liveness is a live check, not a leftover file", async () => {
+  if (!companionStatus) return "SKIP no editor is running";
+  assert(typeof companionStatus.serving === "boolean", "companion.status does not report serving");
+  assert(!companionStatus.ready || companionStatus.serving, "ready is true while serving is false");
+
+  // The regression this guards: the companion writes a status file naming its port and only rewrites it on a
+  // state change, so the file outlives the process. After one machine restart it advertised a port nothing
+  // had listened on since the previous day, the status said "ready", and every call to the generic server
+  // came back "No Unity Editor instances found". Connecting is the only honest test, so the test connects.
+  const port = companionStatus.bridge?.unity_port;
+  if (!companionStatus.serving) return `reported as not serving${port ? ` on port ${port}` : ""}, which is a real answer`;
+
+  assert(port > 0, `serving is true but no port was reported: ${JSON.stringify(companionStatus.bridge)}`);
+  const reachable = await new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port, timeout: 2000 });
+    socket.on("connect", () => { socket.destroy(); resolve(true); });
+    socket.on("error", () => resolve(false));
+    socket.on("timeout", () => { socket.destroy(); resolve(false); });
+  });
+  assert(reachable, `companion.status says it is serving, but nothing answers on port ${port}`);
+  return `port ${port} accepted a connection, so "serving" means serving`;
+});
+
 await check("telemetry is off on the editor side, pref and environment both", async () => {
   if (!companionStatus) return "SKIP no editor is running";
   assert(companionStatus.telemetryDisabled, "MCPForUnity.TelemetryDisabled is not set in EditorPrefs");
@@ -160,11 +185,32 @@ function spawnTool(cmd, args, opts = {}) {
   return spawn([cmd, ...args].map(quote).join(" "), { ...opts, shell: true });
 }
 
+/**
+ * How .mcp.json says to launch the companion server, so this suite tests the configuration that is actually
+ * used rather than a command that happens to resemble it. The two drifted once already: the config gained a
+ * flag the test did not have, and the test kept passing while the real thing hung.
+ */
+function configuredLaunch() {
+  const fallback = {
+    command: "uv",
+    args: ["run", "--directory", serverDir, "--frozen", "--no-sync", "mcp-for-unity"],
+    env: { DISABLE_TELEMETRY: "1", UNITY_MCP_DISABLE_TELEMETRY: "1", MCP_DISABLE_TELEMETRY: "1" },
+  };
+  try {
+    const entry = JSON.parse(readFileSync(join(repo, ".mcp.json"), "utf8")).mcpServers?.["unity-generic"];
+    if (!entry?.command || !Array.isArray(entry.args)) return fallback;
+    return { command: entry.command, args: entry.args, env: entry.env ?? {} };
+  } catch {
+    return fallback;
+  }
+}
+
 /** Minimal MCP stdio client. The companion's server is Python, so this cannot reuse our own harness. */
 function startCompanionServer() {
-  const child = spawnTool("uv", ["run", "--directory", serverDir, "--frozen", "mcp-for-unity"], {
+  const launch = configuredLaunch();
+  const child = spawnTool(launch.command, launch.args, {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, DISABLE_TELEMETRY: "1", UNITY_MCP_DISABLE_TELEMETRY: "1", MCP_DISABLE_TELEMETRY: "1" },
+    env: { ...process.env, ...launch.env },
   });
 
   const pending = new Map();
@@ -236,7 +282,9 @@ await check("its server completes an MCP handshake", async () => {
   });
   assert(init.result?.serverInfo, `no serverInfo in the initialize reply: ${JSON.stringify(init).slice(0, 300)}`);
   server.notify("notifications/initialized", {});
-  return `${init.result.serverInfo.name} ${init.result.serverInfo.version}`;
+  const launch = configuredLaunch();
+  return `${init.result.serverInfo.name} ${init.result.serverInfo.version}, launched as configured: ` +
+    `${launch.command} ${launch.args.filter((a) => !a.includes("/")).join(" ")}`;
 });
 
 await check("it exposes the generic editor surface our bridge leaves alone", async () => {

@@ -373,6 +373,20 @@ if (serverEntry && supervisorEntry) {
 // ---------------------------------------------------------------- 7. the bundled Python server
 
 const serverDir = join(repo, "third_party", "unity-mcp", "Server");
+
+/**
+ * Whether the bundled server's environment is already usable.
+ *
+ * Checked by the presence of the entry point `uv run` would invoke, which is what a completed sync leaves
+ * behind. Cheap, and it turns re-running the installer from a nine-minute contended sync into a no-op.
+ */
+function companionEnvironmentReady() {
+  const venv = join(serverDir, ".venv");
+  const entry = process.platform === "win32"
+    ? join(venv, "Scripts", "mcp-for-unity.exe")
+    : join(venv, "bin", "mcp-for-unity");
+  return existsSync(entry);
+}
 const uvVersion = options.skipServerDeps ? null : have("uv");
 
 if (options.skipServerDeps) {
@@ -382,12 +396,22 @@ if (options.skipServerDeps) {
 } else if (!uvVersion) {
   step("companion server deps", "warn", "uv is not on PATH, so the generic Unity MCP server cannot run",
     "install uv (https://docs.astral.sh/uv/); the editor bridge and our own server work without it");
+} else if (companionEnvironmentReady()) {
+  // Already prepared, so do not sync again — and this is the common case, because the README has you leave
+  // the editor open. The Unity package runs a server of its own out of this same environment, and a sync
+  // then tries to replace an executable that server is holding open; on Windows that fails outright.
+  step("companion server deps", "ok", "already prepared; left alone so it does not fight the editor's own server");
 } else {
   const synced = run("uv", ["sync", "--frozen", "--directory", serverDir], { timeout: 900_000 });
-  if (synced.ok) step("companion server deps", "ok", `uv sync --frozen with ${uvVersion}`);
-  else
+  if (synced.ok) {
+    step("companion server deps", "ok", `uv sync --frozen with ${uvVersion}`);
+  } else if (/os error 32|being used by another process|另一个程序正在使用此文件/i.test(synced.out)) {
+    step("companion server deps", "warn", "uv sync could not replace a file the editor's own server is using",
+      "close the Unity editor once and re-run this, or accept the environment as it stands if it already works");
+  } else {
     step("companion server deps", "warn", `uv sync failed: ${synced.out.slice(-500)}`,
       "the generic half will not start until this succeeds; the VRChat half is unaffected");
+  }
 }
 
 // ---------------------------------------------------------------- 8. MCP client configuration
@@ -415,7 +439,11 @@ if (!options.mcpConfig) {
   if (companionRunnable) {
     config.mcpServers["unity-generic"] = {
       command: "uv",
-      args: ["run", "--directory", serverDir.replace(/\\/g, "/"), "--frozen", "mcp-for-unity"],
+      // --no-sync because this step has already synced the environment, and because two processes share it:
+      // the Unity package starts a server of its own from the same venv, and a syncing `uv run` then tries to
+      // replace an executable that server is holding open. On Windows that fails outright ("another program
+      // is using this file"), and the client sees a server that never answers initialize.
+      args: ["run", "--directory", serverDir.replace(/\\/g, "/"), "--frozen", "--no-sync", "mcp-for-unity"],
       // Passed explicitly: this server reports usage to a third party unless told not to. The editor-side
       // half is switched off separately, from inside the bridge, because it has its own opt-out.
       env: { DISABLE_TELEMETRY: "1", UNITY_MCP_DISABLE_TELEMETRY: "1", MCP_DISABLE_TELEMETRY: "1" },

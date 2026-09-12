@@ -13,6 +13,7 @@
         "--directory",
         "D:/Projects/VRChatWorldSDKAgentic/third_party/unity-mcp/Server",
         "--frozen",
+        "--no-sync",
         "mcp-for-unity"
       ],
       "env": {

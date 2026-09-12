@@ -17,6 +17,28 @@ the build VRChat supports. Check its verdict rather than trusting a folder name.
 
 Sign in to VRChat once in that project's SDK control panel. Nothing else needs a human.
 
+## After a reboot
+
+One command. The supervisor picks the right editor and launches it; the bridge rebinds a fresh port and
+republishes its registry entry; the bundled generic package starts its own bridge from the editor's load
+hook. Nothing needs reinstalling.
+
+```bash
+node bundled/vrcw-supervisor.mjs watch --project "E:/Unity/WorldTest" --auto-dismiss-dialogs true
+```
+
+Two files left over from the previous boot are worth knowing about, because both look like health and are
+not:
+
+- `%LOCALAPPDATA%\AgenticVrcw\instances\*.json` names a port and a pid that no longer exist. Clients check
+  process liveness before believing it.
+- `~/.unity-mcp/unity-mcp-status-*.json` names the companion's port. That file survives a crash or a reboot
+  and is only rewritten on a state change, so neither its presence nor its timestamp means anything.
+  `companion_status` connects to the port rather than trusting the file, and reports `serving`.
+
+If the generic tools answer "No Unity Editor instances found" against an editor that is plainly running, that
+stale file is the reason and `companion_setup` is the fix.
+
 ## Is it healthy?
 
 | Question | Call |
@@ -84,10 +106,12 @@ companion_status           names the cause; nextSteps says what to do
 companion_setup            fixes it, idempotently
 ```
 
-There are only ever two causes. Unity rescans `Packages/` at startup only, so a package added to a running
-editor never compiles until `PackageManager.Client.Resolve()` runs; and the companion's bridge does not
-survive a domain reload, which the bridge now restarts for you on every load. A freshly opened editor needs
-nothing.
+Three causes, and `companion_status` says which. Unity rescans `Packages/` at startup only, so a package added
+to a running editor never compiles until `PackageManager.Client.Resolve()` runs. The companion's bridge does
+not survive a domain reload, so something has to restart it — our load hook does, every load. And a status
+file left behind by a previous editor advertises a port nothing is listening on, which is why
+`companion_status` reports `serving` from a connection attempt rather than from the file. A freshly opened
+editor needs nothing.
 
 ### UdonSharp fields are empty after a build
 

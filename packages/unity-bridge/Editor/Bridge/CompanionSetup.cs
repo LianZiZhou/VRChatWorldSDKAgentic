@@ -65,6 +65,7 @@ namespace Agentic.Vrcw.Bridge
             }
 
             var status = ReadStatusFile();
+            bool serving = IsServing(status);
             bool autoStart = EditorPrefs.GetBool(AutoStartPref, false);
 
             var result = new Dictionary<string, object>
@@ -77,7 +78,8 @@ namespace Agentic.Vrcw.Bridge
                 { "autoStartOnLoad", autoStart },
                 { "telemetryDisabled", EditorPrefs.GetBool(TelemetryDisabledPref, false) },
                 { "telemetryOptOutEnv", Environment.GetEnvironmentVariable("DISABLE_TELEMETRY") == "1" },
-                { "bridge", status }
+                { "bridge", status },
+                { "serving", serving }
             };
 
             var nextSteps = new List<string>();
@@ -89,8 +91,12 @@ namespace Agentic.Vrcw.Bridge
                 nextSteps.Add("Compiled but its bridge will not auto-start: the EditorPref " + AutoStartPref + " defaults to false. Call companion.setup.");
             else if (status == null)
                 nextSteps.Add("Auto-start is enabled but no status file exists yet. Call companion.setup to start the bridge now.");
+            else if (!serving)
+                nextSteps.Add("A status file exists but nothing is listening on port " +
+                              Json.GetInt(status, "unity_port", 0) + ". It was left behind by an editor that is " +
+                              "gone — its own server will chase that dead port too. Call companion.setup.");
 
-            result["ready"] = installed && loaded.Count > 0 && autoStart && status != null;
+            result["ready"] = installed && loaded.Count > 0 && autoStart && serving;
             result["nextSteps"] = nextSteps;
             return result;
         }
@@ -122,6 +128,36 @@ namespace Agentic.Vrcw.Bridge
             }
             catch (Exception) { }
             return null;
+        }
+
+        /// <summary>
+        /// Whether anything is actually listening on the port the status file advertises.
+        ///
+        /// The file is not evidence. It survives a crash, a kill and a reboot, and the companion only rewrites
+        /// it on a state change rather than on a timer, so neither its presence nor its timestamp says whether
+        /// the bridge is alive. After one machine restart this reported a healthy companion for a port nothing
+        /// had listened on since the previous day, and the server it was meant to serve answered every call
+        /// with "No Unity Editor instances found". A connect attempt is the only honest test — the same reason
+        /// the editor registry checks process liveness rather than believing its own file.
+        /// </summary>
+        private static bool IsServing(Dictionary<string, object> status)
+        {
+            if (status == null) return false;
+            int port = Json.GetInt(status, "unity_port", 0);
+            if (port <= 0 || port > 65535) return false;
+
+            try
+            {
+                using (var probe = new System.Net.Sockets.TcpClient())
+                {
+                    var connect = probe.BeginConnect(System.Net.IPAddress.Loopback, port, null, null);
+                    // Short: this is loopback, and companion.status is called from tools that should not block.
+                    if (!connect.AsyncWaitHandle.WaitOne(400)) return false;
+                    probe.EndConnect(connect);
+                    return probe.Connected;
+                }
+            }
+            catch (Exception) { return false; }
         }
 
         // ------------------------------------------------------------------ telemetry
@@ -178,7 +214,7 @@ namespace Agentic.Vrcw.Bridge
         {
             DisableCompanionTelemetry();
             if (!EditorPrefs.GetBool(AutoStartPref, false)) EditorPrefs.SetBool(AutoStartPref, true);
-            if (ReadStatusFile() != null) return;
+            if (IsServing(ReadStatusFile())) return;
 
             var host = Reflect.ResolveType(BridgeHostType);
             var start = host == null ? null : host.GetMethod("StartAutoConnect",
@@ -237,8 +273,9 @@ namespace Agentic.Vrcw.Bridge
             // Before starting anything, so the server it launches inherits the opt-out.
             actions.AddRange(DisableCompanionTelemetry());
 
-            // 3. Start it now, so the caller does not have to restart the editor.
-            if ((bool)before["compiled"] && ReadStatusFile() == null)
+            // 3. Start it now, so the caller does not have to restart the editor. Keyed on whether it is
+            //    actually serving, not on whether a status file happens to exist.
+            if ((bool)before["compiled"] && !(bool)before["serving"])
             {
                 try
                 {
@@ -282,6 +319,22 @@ namespace Agentic.Vrcw.Bridge
         static CompanionAutoEnable()
         {
             if (EditorPrefs.GetBool(OptOutPref, false)) return;
+
+            // Telemetry first, and from the static constructor rather than the tick below.
+            //
+            // The companion starts a server of its own during editor startup, and that child inherits the
+            // editor's environment at the moment it is spawned. Setting the opt-out ten update ticks later
+            // was demonstrably too late on a cold boot: the variable was still unset when the editor had
+            // already come up. Doing it here moves it to assembly load, which needs no main loop and no
+            // companion API.
+            //
+            // Not airtight, and worth saying so: [InitializeOnLoad] order between assemblies is not defined,
+            // so a companion that spawned its server before this assembly loaded would still miss it. The
+            // server an MCP client launches is covered regardless, because its opt-out is written into
+            // .mcp.json.
+            try { CompanionSetup.DisableCompanionTelemetry(); }
+            catch (Exception) { /* the companion may not be installed; the tick reports properly */ }
+
             EditorApplication.update -= Tick;
             EditorApplication.update += Tick;
         }
