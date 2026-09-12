@@ -30,11 +30,11 @@ Unity 6, which VRChat does not support. See [docs/ARCHITECTURE.md](docs/ARCHITEC
 
 ## Status
 
-**Complete and verified against a live editor: 165 checks across 12 suites.**
+**Complete and verified against a live editor: 167 checks across 12 suites.**
 
 | Suite | Covers | Result |
 |---|---|---|
-| `tests/e2e-world.mjs` | **scaffold → script → verify → build the full world, PC and Quest** | 20/20 in ~48s |
+| `tests/e2e-world.mjs` | **scaffold → script → verify → build the full world, PC and Quest** | 21/21 in ~48s |
 | `tests/m0-smoke.mjs` | bridge transport, eval, reflection, jobs | 21/21 |
 | `tests/m1-udon.mjs` | UdonSharp authoring loop | 15/15 |
 | `tests/m2-world.mjs` | project setup, scaffolding, validation, scene spec, audit, renders | 20/20 |
@@ -42,7 +42,7 @@ Unity 6, which VRChat does not support. See [docs/ARCHITECTURE.md](docs/ARCHITEC
 | `tests/m4-budget-assets.mjs` | dual-platform budget, provenance, procedural geometry | 17/17 |
 | `tests/m5-lint-whitelist.mjs` | out-of-Unity linter, Udon exposure whitelist | 11/11 |
 | `tests/m5-checkpoint.mjs` | checkpoint / rollback safety | 10/10 |
-| `tests/companion-mcp.mjs` | bundled generic layer: licence, install, telemetry, reachability | 13/13 |
+| `tests/companion-mcp.mjs` | bundled generic layer: licence, install, telemetry, liveness, reachability | 14/14 |
 | `tests/mcp-handshake.mjs` | MCP stdio protocol and tool surface | 6/6 |
 | `tests/m4-open-assets.mjs` | open-licence fetching, against the live Poly Haven API | 8/8 |
 | `tests/dialog-recovery.mjs` | raises a real modal dialog and recovers from it | 8/8 |
@@ -66,10 +66,13 @@ preflight are tested (`verify_multiclient_preflight`); the launch-and-converge p
 It reports precisely which preconditions are missing rather than failing opaquely, but treat it as untested
 code until you have run it yourself.
 
-Two other honest limits. A job interrupted by an editor restart is journalled and reported as `interrupted`;
-it does not resume by itself, because a half-finished build or play-mode session has to start again anyway.
-And scenario steps do not check reachability — `grab` and `interact` reach the object wherever it is, so
-whether a player could actually get to it stays `scene_spatial_audit`'s question.
+Three other honest limits. A job interrupted by an editor restart is journalled and reported as
+`interrupted`; it does not resume by itself, because a half-finished build or play-mode session has to start
+again anyway. Scenario steps do not check reachability — `grab` and `interact` reach the object wherever it
+is, so whether a player could actually get to it stays `scene_spatial_audit`'s question. And there is no
+texture atlasing or LOD generation: `budget_report` says when atlasing would help and
+`budget_apply_import_presets` handles compression, but rewriting meshes and UVs is a destructive operation
+that deserves a human deciding to run it.
 
 ## Tools
 
@@ -144,12 +147,14 @@ Sign in once in the SDK control panel of that Unity project. The panel only regi
 
 ### If the generic half goes quiet
 
-`companion_status` says why, in terms of the three things that actually go wrong: Unity only rescans
+`companion_status` says why, in terms of the four things that actually go wrong: Unity only rescans
 `Packages/` at startup, so a package added to a running editor never compiles until
 `PackageManager.Client.Resolve()` runs; the companion's bridge is gated behind an EditorPref that defaults to
-false; and that bridge does not survive a domain reload, so something has to start it again after every
-recompile. `companion_setup` fixes the first two on demand, and the bridge handles the third on every load —
-which is why a freshly opened editor needs nothing.
+false; that bridge does not survive a domain reload, so something has to start it again after every recompile;
+and the status file it leaves behind outlives the editor, so a machine restart leaves a file advertising a
+port nothing is listening on. `companion_setup` fixes the first two on demand, the bridge handles the third on
+every load, and `serving` comes from connecting to the port rather than from the file — which is why a freshly
+opened editor, or a freshly rebooted machine, needs nothing.
 
 ## Development
 

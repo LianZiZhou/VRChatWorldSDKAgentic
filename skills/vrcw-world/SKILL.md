@@ -177,3 +177,19 @@ Two limits worth knowing. `grab` and `interact` do not check reachability — th
 wherever it is, so "can a player actually get to it" stays `scene_spatial_audit`'s question. And video
 playback needs the network, so scenarios drive `_onVideoStart` / `_onVideoEnd` and check the world's reaction
 rather than streaming anything.
+
+## Look at the renders
+
+`scene_survey_shots` is not a formality. Two failures in the showcase world were invisible to every
+programmatic check and obvious in a single frame:
+
+- **Everything was white.** Unity primitives all arrive with the same `Default-Material`, so a white cube in
+  front of a white wall is genuinely indistinguishable — the world photographed as an empty room. Give
+  objects distinct materials (`assets_make_material`, then set `sharedMaterial` through `scene_apply_spec`)
+  before believing any render.
+- **The video screen faced the wall.** A Unity Quad's front face points **+Z**, so a screen placed on the -Z
+  wall without rotation shows the room its back, and backface culling makes it invisible from everywhere a
+  player can stand. Rotate `[0, 180, 0]`. The same applies to any Quad used as a screen, sign or menu.
+
+Use at least four yaw steps from the spawn. With two, anything at ±90° — which is where furniture naturally
+ends up — appears in no frame at all.

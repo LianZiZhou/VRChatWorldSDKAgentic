@@ -52,6 +52,21 @@ const SCREEN_ON = "World/Screen/Playing";
 const DOOR_CLOSED = [0, 1.1, 5.1];
 const DOOR_OPEN = [2.1, 1.1, 5.1];
 
+// A colour per element, so a render shows which thing is which.
+const PALETTE = {
+  button: "Assets/Agentic/Materials/E2EButton.mat",
+  door: "Assets/Agentic/Materials/E2EDoor.mat",
+  prop: "Assets/Agentic/Materials/E2EProp.mat",
+  chair: "Assets/Agentic/Materials/E2EChair.mat",
+  screen: "Assets/Agentic/Materials/E2EScreen.mat",
+  accent: "Assets/Agentic/Materials/E2EAccent.mat",
+};
+
+const renderer = (material) => ({
+  type: "UnityEngine.MeshRenderer",
+  fields: { sharedMaterial: { $asset: material } },
+});
+
 const analyzer = join(here, "..", "packages", "udon-analyzer", "bin", "Release", "net8.0",
   process.platform === "win32" ? "udon-analyzer.exe" : "udon-analyzer");
 
@@ -354,10 +369,13 @@ try {
         { path: CHAIR, primitive: "Cube", position: [-2, 0.5, 0], scale: [0.6, 0.1, 0.6] },
         { path: CHAIR_ENTER, position: [-2, 0.6, 0] },
         { path: CHAIR_EXIT, position: [-2.8, 0.1, 0] },
-        { path: CHAIR_MENU, primitive: "Quad", position: [-2, 1.6, 0], scale: [0.8, 0.5, 1], active: false },
+        // Quads face +Z. A menu for someone seated facing +Z has to be turned around to face them back.
+        { path: CHAIR_MENU, primitive: "Quad", position: [-2, 1.4, 1.0], rotation: [0, 180, 0], scale: [0.8, 0.5, 1], active: false },
 
         // A video screen: the Unity player, its audio, and VRChat's wrapper around them.
-        { path: SCREEN, primitive: "Quad", position: [0, 2, -4.8], scale: [4, 2.25, 1] },
+        // Turned to face into the room: on the -Z wall an unrotated Quad shows the room its back face, and
+        // backface culling then makes the screen invisible from everywhere a player can stand.
+        { path: SCREEN, primitive: "Quad", position: [0, 2, -4.8], rotation: [0, 180, 0], scale: [4, 2.25, 1] },
         { path: SCREEN_ON, primitive: "Sphere", position: [2.2, 2, -4.8], scale: [0.2, 0.2, 0.2], active: false },
       ],
       saveScene: true,
@@ -418,6 +436,42 @@ try {
       .map((c) => String(c.type).split(".").pop());
     return `${applied.created.length + wired.created.length} created, ` +
       `${applied.updated.length + wired.updated.length} updated; components: ${components.join(", ")}`;
+  });
+
+  await step("give the world materials, so its renders are readable", async () => {
+    // Not decoration. Every primitive arrives with the same white Default-Material, and a survey render of a
+    // white cube against a white wall shows nothing at all — the first pass of this world photographed as an
+    // empty room. Distinct colours are what make the render a check rather than a formality.
+    const palette = [
+      { path: PALETTE.button, colour: [0.85, 0.2, 0.15, 1] },
+      { path: PALETTE.door, colour: [0.45, 0.3, 0.18, 1] },
+      { path: PALETTE.prop, colour: [0.95, 0.75, 0.1, 1] },
+      { path: PALETTE.chair, colour: [0.2, 0.45, 0.8, 1] },
+      { path: PALETTE.screen, colour: [0.07, 0.07, 0.09, 1] },
+      { path: PALETTE.accent, colour: [0.15, 0.8, 0.45, 1] },
+    ];
+    for (const entry of palette) {
+      await rpc("assets.make_material",
+        { path: entry.path, shader: "Standard", colors: { _Color: entry.colour }, floats: { _Glossiness: 0.2 } },
+        { timeoutMs: 120_000 });
+    }
+
+    const painted = await rpc("scene.apply_spec", {
+      objects: [
+        { path: BUTTON, components: [renderer(PALETTE.button)] },
+        { path: DOOR, components: [renderer(PALETTE.door)] },
+        { path: PROP, components: [renderer(PALETTE.prop)] },
+        { path: PROP_GLOW, components: [renderer(PALETTE.accent)] },
+        { path: CHAIR, components: [renderer(PALETTE.chair)] },
+        { path: CHAIR_MENU, components: [renderer(PALETTE.accent)] },
+        { path: SCREEN, components: [renderer(PALETTE.screen)] },
+        { path: SCREEN_ON, components: [renderer(PALETTE.accent)] },
+        { path: DISPLAY, components: [renderer(PALETTE.accent)] },
+      ],
+      saveScene: true,
+    }, { timeoutMs: 180_000 });
+    assert(painted.warnings.length === 0, `warnings: ${JSON.stringify(painted.warnings)}`);
+    return `${palette.length} materials on ${painted.updated.length} objects`;
   });
 
   // ------------------------------------------------------------------ the script
@@ -532,8 +586,10 @@ try {
   });
 
   await step("photograph the world from the spawn", async () => {
+    // Four yaw steps rather than two: with two, the prop and the chair sit exactly at the edges and appear
+    // in no frame at all, which makes the renders look like an empty room and the check like a formality.
     const shots = await rpc("scene.survey_shots",
-      { mode: "all", width: 800, height: 450, yawSteps: 2, orbitCount: 2, label: "e2e" }, { timeoutMs: 180_000 });
+      { mode: "all", width: 800, height: 450, yawSteps: 4, orbitCount: 2, label: "e2e" }, { timeoutMs: 180_000 });
     let smallest = Infinity;
     for (const shot of shots.shots) {
       assert(existsSync(shot.file), `missing ${shot.file}`);
