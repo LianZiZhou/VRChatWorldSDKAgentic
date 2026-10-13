@@ -39,6 +39,12 @@ namespace Agentic.Vrcw.Bridge
 
         static BridgeServer()
         {
+            // Unity's parallel asset-import workers (AssetImportWorkerN, launched with -batchMode) load
+            // every editor assembly in the project, this one included. Left alone they each bind a port
+            // and overwrite the registry entry with their own pid and token, and delete it when they
+            // exit, which makes the real editor unreachable. Nothing an agent needs runs in batch mode.
+            if (Application.isBatchMode) return;
+
             // A second editor opening the same project, or a domain reload, must not leave a stale
             // listener bound to the port.
             // A reload only closes the listener — the registry entry stays, because the port and token
