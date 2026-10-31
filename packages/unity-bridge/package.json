@@ -4,6 +4,11 @@
   "version": "0.1.0",
   "unity": "2022.3",
   "description": "Always-on editor bridge that lets an external agent drive VRChat world development.",
-  "author": { "name": "VRChatWorldSDKAgentic" },
-  "vpmDependencies": { "com.vrchat.worlds": ">=3.7.0" }
+  "author": {
+    "name": "VRChatWorldSDKAgentic"
+  },
+  "vpmDependencies": {
+    "com.vrchat.worlds": ">=3.7.0"
+  },
+  "license": "MIT"
 }

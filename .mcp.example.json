@@ -3,7 +3,7 @@
     "vrcw": {
       "command": "node",
       "args": [
-        "D:/Projects/VRChatWorldSDKAgentic/bundled/vrcw-mcp.mjs"
+        "/absolute/path/to/VRChatWorldSDKAgentic/bundled/vrcw-mcp.mjs"
       ]
     },
     "unity-generic": {
@@ -11,7 +11,7 @@
       "args": [
         "run",
         "--directory",
-        "D:/Projects/VRChatWorldSDKAgentic/third_party/unity-mcp/Server",
+        "/absolute/path/to/VRChatWorldSDKAgentic/third_party/unity-mcp/Server",
         "--frozen",
         "--no-sync",
         "mcp-for-unity"

@@ -21,3 +21,29 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+
+# Machine-local configuration and credentials.
+/.mcp.json
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+.npmrc
+.pypirc
+
+# Unity project caches and local editor settings.
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+/[Bb]uild/
+/[Bb]uilds/
+.vs/
+.idea/
+.DS_Store
+Thumbs.db

@@ -195,5 +195,18 @@ and `tests/companion-mcp.mjs` fails if the upstream tools we rely on are renamed
 - Regenerate the Udon whitelist after an SDK upgrade: `udon_export_whitelist`.
 - The bundled generic package also starts a server of its own on load (`127.0.0.1:8080` by default) — that is
   its behaviour, not ours; the telemetry opt-out covers it because the editor passes it down.
-- This repository has no licence file yet. The vendored third-party code keeps its own (MIT); decide what you
-  want for the rest before publishing anything from `scripts/publish.mjs`.
+
+## Local configuration
+
+The installer generates `.mcp.json` with paths for your machine; this file is intentionally ignored by Git.
+See `.mcp.example.json` for the configuration shape. Run `scripts/install.mjs --project <project-path>`
+to generate the real configuration, or copy the example and replace `/absolute/path/to/VRChatWorldSDKAgentic`
+with your checkout path. Never commit local credentials or the project's `.agentic/` runtime state.
+
+## License
+
+Original project code is licensed under the [MIT License](LICENSE).
+Vendored MCP for Unity retains its [upstream MIT license](third_party/unity-mcp/LICENSE).
+The committed Node bundles include third-party code; the applicable copyright notices and license texts
+are collected in [bundled/THIRD_PARTY_NOTICES.txt](bundled/THIRD_PARTY_NOTICES.txt).
+Unity and the VRChat Worlds SDK must be installed separately and are not redistributed by this repository.
